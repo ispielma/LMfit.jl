@@ -23,7 +23,7 @@ export @generate_model
 # Definition of individal parameter class
 include("parameter_objects.jl")
 import .ParameterObjects: AbstractParameter, Parameter, Constant, Expression, IndependentVariable, validate, PARAMETERS
-import .ParameterObjects: update_depends_on!
+import .ParameterObjects: depends_on
 
 #=
 .########.....###....########.....###....##.....##.########.########.########.########...######.
@@ -41,6 +41,29 @@ end
 Parameters() = Parameters(OrderedDict{Symbol, Parameter}())
 Parameters(args...; kwargs...) = add!(Parameters(), args...; kwargs...)
 
+#
+# New methods for existing Base functions
+#
+
+function Base.getindex(ps::Parameters, indices...)
+    ps.parameters[indices...]
+end
+Base.iterate(ps::Parameters) = iterate(ps.parameters)
+Base.iterate(ps::Parameters, state) = iterate(ps.parameters, state)
+Base.keys(ps::Parameters) = keys(ps.parameters)
+Base.length(ps::Parameters) = length(ps.parameters)
+Base.values(ps::Parameters) = values(ps.parameters)
+Base.setindex!(ps::Parameters, value, key) = setindex!(ps.parameters, value, key)
+
+function Base.show(io::IO, ps::Parameters)
+    println(io, "Parameters:")
+    for p in values(ps.parameters)
+        println(io, "\t$(String(p))")
+    end
+end
+
+# New methods
+
 function add!(ps::Parameters, p::AbstractParameter)
     ps.parameters[p.name] = p
     ps
@@ -53,6 +76,13 @@ function add!(ps::Parameters, pvec::Vector{AbstractParameter})
 end
 add!(ps::Parameters, name::Symbol, parameter_type::Symbol, args...; kwargs...) = add!(ps, PARAMETERS[parameter_type](name, args...; kwargs...))
 add!(ps::Parameters, name::Symbol, args...; kwargs...) = add!(ps::Parameters, name::Symbol, :parameter, args...; kwargs...) # default to a parameter
+
+"""
+    depends_on
+
+find all dependencies between parameters
+"""
+depends_on(ps::Parameters) = Dict(k=>depends_on(p) for (k, p) in ps)
 
 """
     validate
@@ -80,35 +110,32 @@ It will then resort the parameters in the order that they need to be resolved if
 function find_dependencies!(ps::Parameters)
 
     # Find dependencies
-    for p in values(ps.parameters)
-        update_depends_on!(p)
-    end
+    dependencies = depends_on(ps)
 
-    unsorted_parameters = copy(ps.parameters) # not a deep copy
-    sorted_parameters = empty(unsorted_parameters) # create an empty version of unsorted_parameters
+    sorted_parameters = empty(ps.parameters) # create an empty version of ps.parameters
 
     resolved_one = true
     while resolved_one 
         resolved_one = false
 
         # find resolved dependencies
-        for (name, p) in unsorted_parameters
-            if isempty(p._depends_on)
-                sorted_parameters[name] = p
-                delete!(unsorted_parameters, name)
+        for (name, dep) in dependencies
+            if isempty(dep)
+                sorted_parameters[name] = ps[name]
+                delete!(dependencies, name)
                 resolved_one = true
             end
         end
 
         # remove resolved variables from depends_on sets
-        for unsorted in values(unsorted_parameters)
+        for dep in values(dependencies)
             for sorted in values(sorted_parameters)
-                delete!(unsorted._depends_on, sorted.name)
+                delete!(dep, sorted.name)
             end
         end
     end
 
-    if !isempty(unsorted_parameters)
+    if !isempty(dependencies)
         error("Circular dependencies detected")
     end
 
@@ -125,9 +152,9 @@ Creates a function that evaluates a vector of varied parameters and returns a ve
 """
 function resolve_parameters(ps::Parameters)
     
-    inputs = [p for p in values(ps) if p.vary]
-    constants = [p for p in values(ps) if !p.vary && p.expr == :()]
-    expressions = [p for p in values(ps) if p.expr != :()]
+    inputs = [p for p in values(ps) if typeof(p) <: Parameter]
+    constants = [p for p in values(ps) if typeof(p) <: Constant]
+    expressions = [p for p in values(ps) if typeof(p) <: Expression]
 
      # we take a vector of parameters
     prog = "(params) -> begin\n"
@@ -159,28 +186,6 @@ function resolve_parameters(ps::Parameters)
     body = Meta.parse(prog)
 
     eval(body)
-end
-
-
-#
-# New methods for existing Base functions
-#
-
-function Base.getindex(ps::Parameters, indices...)
-    ps.parameters[indices...]
-end
-Base.iterate(ps::Parameters) = iterate(ps.parameters)
-Base.iterate(ps::Parameters, state) = iterate(ps.parameters, state)
-Base.keys(ps::Parameters) = keys(ps.parameters)
-Base.length(ps::Parameters) = length(ps.parameters)
-Base.values(ps::Parameters) = values(ps.parameters)
-Base.setindex!(ps::Parameters, value, key) = setindex!(ps.parameters, value, key)
-
-function Base.show(io::IO, ps::Parameters)
-    println(io, "Parameters:")
-    for p in values(ps.parameters)
-        println(io, "\t$(String(p))")
-    end
 end
 
 #=
@@ -372,7 +377,6 @@ struct FitModel
 end
 function FitModel(m::Model, ps::Parameters; kwargs...) # kwargs are the x variables
     # Organize the independent variables
-
     (vars, not_vars) = strip_vars_kwargs(m, kwargs)
 
     # convert to a dict
@@ -382,15 +386,15 @@ function FitModel(m::Model, ps::Parameters; kwargs...) # kwargs are the x variab
     find_dependencies!(ps)
 
     # Get the names of the parameters that are exposed to LsqFit
-    params_exposed_names::Vector{Symbol} = [name for (name, p) in ps if typeof(p) == Parameter]
+    params_exposed_names::Vector{Symbol} = [name for (name, p) in ps if typeof(p) <: Parameter]
 
-    # ps_new = deepcopy(ps)
-    # validate(ps_new)
+    ps_new = deepcopy(ps)
+    validate(ps_new)
 
     # Get the mapping function
-    # vect_to_params = resolve_parameters(ps_new)
+    vect_to_params = resolve_parameters(ps_new)
 
-    # FitModel(params_exposed_names, m, ps_new, var_data, vect_to_params)
+    FitModel(params_exposed_names, m, ps_new, vars, vect_to_params)
 end
 
 function(f::FitModel)(x, p) # x is there only because it is required for the curve_fit function
@@ -423,13 +427,13 @@ function fit(m::Model, ydata, ps::Parameters; kwargs...)
 
     fm = FitModel(m, ps; kwargs...)
 
-    return fm
-
     # Obtain vector of initial parameters and bounds
-    p0 = [p.value for (_, p) in fm.ps if p.vary]
-    lb = [p.min for (_, p) in fm.ps if p.vary]
-    ub = [p.max for (_, p) in fm.ps if p.vary]
+    p0 = [p.value for (_, p) in fm.ps if typeof(p) <: Parameter]
+    lb = [p.min for (_, p) in fm.ps if typeof(p) <: Parameter]
+    ub = [p.max for (_, p) in fm.ps if typeof(p) <: Parameter]
    
+    println("p0 = $([typeof(p) for (_, p) in fm.ps])")
+
     # do curve fit
     result = curve_fit(fm, [], ydata[:], p0, lower=lb, upper=ub)
 

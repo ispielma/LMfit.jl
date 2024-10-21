@@ -6,7 +6,7 @@ All the logic for the individual parameter class
 module ParameterObjects
 
     export AbstractParameter, Constant, Parameter, Expression, IndependentVariable
-    export validate, update_depends_on!
+    export validate, depends_on
     export PARAMETERS
 
     """
@@ -25,7 +25,9 @@ module ParameterObjects
         end
     end
     validate(p::AbstractParameter) = nothing
+    depends_on(p::AbstractParameter) = Set{Symbol}()
     
+
     function Base.show(io::IO, p::AbstractParameter) 
         println(io, String(p))
     end
@@ -38,9 +40,7 @@ module ParameterObjects
         value::T
     end
     Constant(name::Symbol; value=NaN) = Constant(name, value)
-    Constant(p::Parameter) = Constant(p.name, p.value)
-    Constant(p::Expression) = Constant(p.name, p.value)
-    
+
     Base.String(p::Constant) = "Constant: name=$(p.name),\tvalue=$(p.value)"
 
 
@@ -58,8 +58,6 @@ module ParameterObjects
         max::T
     end
     Parameter(name::Symbol; value=NaN, min=-Inf, max=Inf) = Parameter(name, value, min, max)
-    Parameter(p::Constant; kwargs...) = Parameter(p.name; value=p.value, kwargs...)
-    Parameter(p::Expression; kwargs...) = Parameter(p.name; value=p.value, min=p.min, max=p.max, kwargs...)
 
     Base.String(p::Parameter) = "Parameter: name=$(p.name),\tvalue=$(p.value),\tmin=$(p.min),\tmax=$(p.max)"
 
@@ -89,8 +87,6 @@ module ParameterObjects
         expr::Expr
     end
     Expression(name::Symbol; expr=:(), value=NaN, min=-Inf, max=Inf) = return Expression(name, value, min, max, expr)
-    Expression(p::Constant; kwargs...) = Expression(p.name; value=p.value, min=p.min, max=p.max, kwargs...)
-    Expression(p::Parameter; kwargs...) = Expression(p.name; value=p.value, kwargs...)
 
     Base.String(p::Expression) = "Expression: name=$(p.name),\tvalue=$(p.value),\tmin=$(p.min),\tmax=$(p.max),\texpr=$(p.expr)"
 
@@ -100,6 +96,8 @@ module ParameterObjects
         end
     end
 
+    depends_on(p::Expression) = _get_symbols(p.expr)
+  
     """
     IndependentVariable
 
@@ -112,8 +110,6 @@ module ParameterObjects
         println(io, String(p))
     end
     Base.String(p::IndependentVariable) = "IndependentVariable: name=$(p.name)"
-
-    update_depends_on!(p::Parameter) = p._depends_on
 
     function _get_symbols(ex)
         list = []
@@ -132,4 +128,13 @@ module ParameterObjects
         :parameter=>Parameter
         )
 
+    # Conversion tools
+    Constant(p::Parameter) = Constant(p.name, p.value)
+    Constant(p::Expression) = Constant(p.name, p.value)
+
+    Parameter(p::Constant; kwargs...) = Parameter(p.name; value=p.value, kwargs...)
+    Parameter(p::Expression; kwargs...) = Parameter(p.name; value=p.value, min=p.min, max=p.max, kwargs...)
+
+    Expression(p::Constant; kwargs...) = Expression(p.name; value=p.value, min=p.min, max=p.max, kwargs...)
+    Expression(p::Parameter; kwargs...) = Expression(p.name; value=p.value, kwargs...)
 end
