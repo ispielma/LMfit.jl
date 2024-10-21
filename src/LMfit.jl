@@ -12,7 +12,7 @@ using OrderedCollections
 
 # In the future this will be split into several files, but for now I will develop in the main module
 
-export Parameter, Parameters, Model, FitModel
+export Constant, Parameter, Expression, Parameters, Model, FitModel
 export add!, update_vars!, find_dependencies!, make_params, fit
 export @generate_model
 
@@ -22,7 +22,8 @@ export @generate_model
 
 # Definition of individal parameter class
 include("parameter_objects.jl")
-using .ParameterObjects: Parameter, AbstractParameter
+import .ParameterObjects: AbstractParameter, Parameter, Constant, Expression, IndependentVariable, validate, PARAMETERS
+import .ParameterObjects: update_depends_on!
 
 #=
 .########.....###....########.....###....##.....##.########.########.########.########...######.
@@ -44,16 +45,14 @@ function add!(ps::Parameters, p::AbstractParameter)
     ps.parameters[p.name] = p
     ps
 end
-function add!(ps::Parameters, name::Symbol; kwargs...)
-    ps.parameters[name] = Parameter(name; kwargs...)
-    ps
-end
 function add!(ps::Parameters, pvec::Vector{AbstractParameter})
     for p in pvec
         add!(ps, p)
     end
     ps
 end
+add!(ps::Parameters, name::Symbol, parameter_type::Symbol, args...; kwargs...) = add!(ps, PARAMETERS[parameter_type](name, args...; kwargs...))
+add!(ps::Parameters, name::Symbol, args...; kwargs...) = add!(ps::Parameters, name::Symbol, :parameter, args...; kwargs...) # default to a parameter
 
 """
     validate
@@ -66,28 +65,8 @@ function validate(ps::Parameters)
             error("item $(name): Parameters name-key must match name-field the associated record")
         end
 
-        if p.min >= p.max
-            error("item $(name): p.min must be less than p.max")
-        end
-
-        if p.value >= p.max || p.value <= p.min
-            error("item $(name): p.value must be between p.min and p.max")
-        end
-
-        if p.vary==true && p.expr != :()
-            error("Cannot vary and specify an expression")
-        end
+        validate(p)
     end
-end
-
-function _get_symbols(ex)
-    list = []
-    walk!(list) = ex -> begin
-       ex isa Symbol && push!(list, ex)
-       ex isa Expr && ex.head == :call && map(walk!(list), ex.args[2:end])
-       list
-    end
-    Set{Symbol}(walk!([])(ex))
 end
 
 """
@@ -102,11 +81,7 @@ function find_dependencies!(ps::Parameters)
 
     # Find dependencies
     for p in values(ps.parameters)
-        if p.vary
-            p._depends_on = Set{Symbol}()
-        else
-            p._depends_on = _get_symbols(p.expr)
-        end
+        update_depends_on!(p)
     end
 
     unsorted_parameters = copy(ps.parameters) # not a deep copy
@@ -199,6 +174,7 @@ Base.iterate(ps::Parameters, state) = iterate(ps.parameters, state)
 Base.keys(ps::Parameters) = keys(ps.parameters)
 Base.length(ps::Parameters) = length(ps.parameters)
 Base.values(ps::Parameters) = values(ps.parameters)
+Base.setindex!(ps::Parameters, value, key) = setindex!(ps.parameters, value, key)
 
 function Base.show(io::IO, ps::Parameters)
     println(io, "Parameters:")
@@ -264,12 +240,7 @@ kwargs contains the independent (i.e., x, y, ... variables) with keys equal to t
 """
 function (m::Model)(p::Vector; kwargs...)
 
-    if !(m.var_names ⊆ keys(kwargs))
-        error("model.arg_names = $(m.arg_names) must be a subset of kwargs = $(keys(kwargs))")
-    end
-
-    # Pull out independent variables from kwargs
-    vars = Dict(name => kwargs[name] for name in keys(m.var_names))
+    (vars, not_vars) = strip_vars_kwargs(m, kwargs)
 
     if length(p) != length(m.param_names)
         error("p must be same length as Model.param_names")
@@ -282,10 +253,10 @@ function (m::Model)(p::Vector; kwargs...)
 
     # Get independent variables
     for (name, index) in m.var_names
-        args[index] = pop!(kwargs, name)
+        args[index] = vars[name]
     end
 
-    m.func(args...; kwargs...)
+    m.func(args...; not_vars...)
 end
 
 """
@@ -311,9 +282,6 @@ function update_vars!(m::Model, var_names...)
 
     m
 end
-
-
-
 
 """
     @generate_model func
@@ -361,6 +329,25 @@ function make_params(m::Model; kwargs...)
     return ps
 end
 
+"""
+strip_vars_kwargs(m::Model, kwargs)
+
+kwargs can contain a mixture of model variables and other flags, so we will strip them out
+
+returns split out named tuples ()
+"""
+function strip_vars_kwargs(m::Model, kwargs)
+
+    if !(keys(m.var_names) ⊆ keys(kwargs))
+        error("keys(m.var_names) = $(keys(m.var_names)) must be a subset of kwargs = $(keys(kwargs))")
+    end
+
+    vars = pairs(NamedTuple( k=>kwargs[k] for k in keys(m.var_names) ))
+    not_vars = pairs(NamedTuple( k=>v for (k, v) in kwargs if !haskey(m.var_names, k) ))
+
+    return (vars, not_vars)
+
+end
 #=
 .########.####.########....##.....##..#######..########..########.##......
 .##........##.....##.......###...###.##.....##.##.....##.##.......##......
@@ -386,27 +373,24 @@ end
 function FitModel(m::Model, ps::Parameters; kwargs...) # kwargs are the x variables
     # Organize the independent variables
 
-    # TODO: These lines are copied from above, so can be factored out to avoid duplication.
-    if !(m.var_names ⊆ keys(kwargs))
-        error("model.arg_names = $(m.arg_names) must be a subset of kwargs = $(keys(kwargs))")
-    end
+    (vars, not_vars) = strip_vars_kwargs(m, kwargs)
 
-    # Pull out independent variables from kwargs
-    var_data = Dict(name => kwargs[name] for name in keys(m.var_names))
+    # convert to a dict
+    vars = Dict(vars)
 
     # Sort the parameters in order that they need to be determined
     find_dependencies!(ps)
 
     # Get the names of the parameters that are exposed to LsqFit
-    params_exposed_names::Vector{Symbol} = [name for (name, p) in ps if p.vary]
+    params_exposed_names::Vector{Symbol} = [name for (name, p) in ps if typeof(p) == Parameter]
 
-    ps_new = deepcopy(ps)
-    validate(ps_new)
+    # ps_new = deepcopy(ps)
+    # validate(ps_new)
 
     # Get the mapping function
-    vect_to_params = resolve_parameters(ps_new)
+    # vect_to_params = resolve_parameters(ps_new)
 
-    FitModel(params_exposed_names, m, ps_new, var_data, vect_to_params)
+    # FitModel(params_exposed_names, m, ps_new, var_data, vect_to_params)
 end
 
 function(f::FitModel)(x, p) # x is there only because it is required for the curve_fit function
@@ -454,5 +438,16 @@ function fit(m::Model, ydata, ps::Parameters; kwargs...)
     end
     fm.ps
 end
+
+#=
+..######..##.....##.########..########...#######..########..########
+.##....##.##.....##.##.....##.##.....##.##.....##.##.....##....##...
+.##.......##.....##.##.....##.##.....##.##.....##.##.....##....##...
+..######..##.....##.########..########..##.....##.########.....##...
+.......##.##.....##.##........##........##.....##.##...##......##...
+.##....##.##.....##.##........##........##.....##.##....##.....##...
+..######...#######..##........##.........#######..##.....##....##...
+=#
+
 
 end # end of module
