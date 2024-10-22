@@ -96,9 +96,14 @@ via the name of keyword arguments:
 
 so x=x would indicate that the name of the parameter in the function is actually x.
 """
-function fit(m::Model, ydata, ps::Parameters; kwargs...)
+fit(m::Model, ydata::AbstractArray, ps::Parameters; kwargs...) = fit(m::Model, ydata, nothing, ps::Parameters; kwargs...) # TODO: need a nicer way to the weights
 
-    fm = FitModel(m, ps; kwargs...)
+function fit(m::Model, ydata::AbstractArray, wt, ps::Parameters; kwargs...)
+
+    # Organize the independent variables
+    (vars, not_vars) = _strip_vars_kwargs(m, kwargs)
+
+    fm = FitModel(m, ps; vars...)
 
     # Obtain vector of initial parameters and bounds
     p0 = [p.value for (_, p) in fm.ps if typeof(p) <: Parameter]
@@ -106,23 +111,17 @@ function fit(m::Model, ydata, ps::Parameters; kwargs...)
     ub = [p.max for (_, p) in fm.ps if typeof(p) <: Parameter]
    
     # do curve fit
-    result = curve_fit(fm, [], ydata[:], p0, lower=lb, upper=ub)
+    if wt===nothing
+        result = curve_fit(fm, [], ydata[:], p0; lower=lb, upper=ub, not_vars...)
+    else
+        result = curve_fit(fm, [], ydata[:], wt[:], p0; lower=lb, upper=ub, not_vars...)
+    end
 
     for (j, name) in enumerate(fm.params_exposed_names)
         fm.ps[name].value = result.param[j]
     end
     fm.ps
 end
-
-#=
-..######..##.....##.########..########...#######..########..########
-.##....##.##.....##.##.....##.##.....##.##.....##.##.....##....##...
-.##.......##.....##.##.....##.##.....##.##.....##.##.....##....##...
-..######..##.....##.########..########..##.....##.########.....##...
-.......##.##.....##.##........##........##.....##.##...##......##...
-.##....##.##.....##.##........##........##.....##.##....##.....##...
-..######...#######..##........##.........#######..##.....##....##...
-=#
 
 
 end # end of module
