@@ -48,6 +48,37 @@ module ModelObjects
         # to reuse logic we now update the var_names
         update_vars!(m, var_names...)
     end
+
+    function Base.show(io::IO, m::Model)
+        println(io, "Model: $(m.name)")
+        print(io, "\tFunction arguments: ")
+
+        for name in m.arg_names
+            print(io, "$(name), ")
+        end
+
+        if length(m.kwarg_names) > 0
+            print(io, "\n\tFunction keyword arguments: ")
+            for name in m.kwarg_names
+                print(io, "$(name), ")
+            end
+        end
+
+        if length(m.var_names) > 0
+            print(io, "\n\tIndependent variables: ")
+            for name in keys(m.var_names)
+                print(io, "$(name), ")
+            end
+        end
+
+        if length(m.param_names) > 0
+            print(io, "\n\tParameters: ")
+            for name in keys(m.param_names)
+                print(io, "$(name), ")
+            end
+        end
+    end
+
     """
     Allow the model to be evaluated given a set of parameters, or just a vector of numerical values for the parameters
 
