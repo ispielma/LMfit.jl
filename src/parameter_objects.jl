@@ -1,9 +1,12 @@
 """
-    Parameter
+    ParameterObjects
 
 All the logic for the individual parameter class
 """
 module ParameterObjects
+
+    using OrderedCollections
+
 
     export AbstractParameter, Constant, Parameter, Expression, IndependentVariable
     export validate, depends_on
@@ -58,6 +61,9 @@ module ParameterObjects
         max::T
     end
     Parameter(name::Symbol; value=NaN, min=-Inf, max=Inf) = Parameter(name, value, min, max)
+    function Parameter(name::Symbol, arg)
+        println("Parameter: name=$(name),\targ=$(arg)")
+    end
 
     Base.String(p::Parameter) = "Parameter: name=$(p.name),\tvalue=$(p.value),\tmin=$(p.min),\tmax=$(p.max)"
 
@@ -82,19 +88,11 @@ module ParameterObjects
     mutable struct Expression{T} <: AbstractParameter
         name::Symbol
         value::T
-        min::T
-        max::T
         expr::Expr
     end
-    Expression(name::Symbol; expr=:(), value=NaN, min=-Inf, max=Inf) = return Expression(name, value, min, max, expr)
+    Expression(name::Symbol; expr=:(), value=NaN) = return Expression(name, value, expr)
 
-    Base.String(p::Expression) = "Expression: name=$(p.name),\tvalue=$(p.value),\tmin=$(p.min),\tmax=$(p.max),\texpr=$(p.expr)"
-
-    function validate(p::Expression)
-        if p.min >= p.max
-            error("item $(name): p.min must be less than p.max")
-        end
-    end
+    Base.String(p::Expression) = "Expression: name=$(p.name),\tvalue=$(p.value),\texpr=$(p.expr)"
 
     depends_on(p::Expression) = _get_symbols(p.expr)
   
@@ -137,4 +135,172 @@ module ParameterObjects
 
     Expression(p::Constant; kwargs...) = Expression(p.name; value=p.value, min=p.min, max=p.max, kwargs...)
     Expression(p::Parameter; kwargs...) = Expression(p.name; value=p.value, kwargs...)
+
+    #=
+    .########.....###....########.....###....##.....##.########.########.########.########...######.
+    .##.....##...##.##...##.....##...##.##...###...###.##..........##....##.......##.....##.##....##
+    .##.....##..##...##..##.....##..##...##..####.####.##..........##....##.......##.....##.##......
+    .########..##.....##.########..##.....##.##.###.##.######......##....######...########...######.
+    .##........#########.##...##...#########.##.....##.##..........##....##.......##...##.........##
+    .##........##.....##.##....##..##.....##.##.....##.##..........##....##.......##....##..##....##
+    .##........##.....##.##.....##.##.....##.##.....##.########....##....########.##.....##..######.
+    =#
+
+    struct Parameters
+        parameters::OrderedDict{Symbol, AbstractParameter}
+    end
+    Parameters() = Parameters(OrderedDict{Symbol, Parameter}())
+    Parameters(args...; kwargs...) = add!(Parameters(), args...; kwargs...)
+
+    #
+    # New methods for existing Base functions
+    #
+
+    function Base.getindex(ps::Parameters, indices...)
+        ps.parameters[indices...]
+    end
+    Base.iterate(ps::Parameters) = iterate(ps.parameters)
+    Base.iterate(ps::Parameters, state) = iterate(ps.parameters, state)
+    Base.keys(ps::Parameters) = keys(ps.parameters)
+    Base.length(ps::Parameters) = length(ps.parameters)
+    Base.values(ps::Parameters) = values(ps.parameters)
+    Base.setindex!(ps::Parameters, value, key) = setindex!(ps.parameters, value, key)
+
+    function Base.show(io::IO, ps::Parameters)
+        println(io, "Parameters:")
+        for p in values(ps.parameters)
+            println(io, "\t$(String(p))")
+        end
+    end
+
+    # New methods
+
+    function add!(ps::Parameters, p::AbstractParameter)
+        ps.parameters[p.name] = p
+        ps
+    end
+    function add!(ps::Parameters, pvec::Vector{AbstractParameter})
+        for p in pvec
+            add!(ps, p)
+        end
+        ps
+    end
+    add!(ps::Parameters, name::Symbol, parameter_type::Symbol, args...; kwargs...) = add!(ps, PARAMETERS[parameter_type](name, args...; kwargs...))
+    function add!(ps::Parameters, name::Symbol, args...; kwargs...)
+
+        kwargs = Dict(kwargs)
+        param_type = pop!(kwargs, :param_type, :parameter) # default to a parameter, otherwise the keyword argument :param_type will be used
+        add!(ps::Parameters, name::Symbol, param_type, args...; kwargs...) 
+    end
+    """
+        depends_on
+
+    find all dependencies between parameters
+    """
+    depends_on(ps::Parameters) = Dict(k=>depends_on(p) for (k, p) in ps)
+
+    """
+        validate
+
+    check for error conditions
+    """
+    function validate(ps::Parameters)
+        for (name, p) in ps
+            if name != p.name
+                error("item $(name): Parameters name-key must match name-field the associated record")
+            end
+
+            validate(p)
+        end
+    end
+
+    """
+        find_dependencies!(ps::Parameters)
+
+    This is a key part of the logic of this package.  It will iterate over the parameters to see if they are
+    fully determined, and to check for error conditions such as circular dependencies.
+
+    It will then resort the parameters in the order that they need to be resolved if there are no errors
+    """
+    function find_dependencies!(ps::Parameters)
+
+        # Find dependencies
+        dependencies = depends_on(ps)
+
+        sorted_parameters = empty(ps.parameters) # create an empty version of ps.parameters
+
+        resolved_one = true
+        while resolved_one 
+            resolved_one = false
+
+            # find resolved dependencies
+            for (name, dep) in dependencies
+                if isempty(dep)
+                    sorted_parameters[name] = ps[name]
+                    delete!(dependencies, name)
+                    resolved_one = true
+                end
+            end
+
+            # remove resolved variables from depends_on sets
+            for dep in values(dependencies)
+                for sorted in values(sorted_parameters)
+                    delete!(dep, sorted.name)
+                end
+            end
+        end
+
+        if !isempty(dependencies)
+            error("Circular dependencies detected")
+        end
+
+        empty!(ps.parameters)
+        for (name, p) in sorted_parameters
+            ps.parameters[name] = p
+        end
+
+        return ps
+    end
+
+    """
+    Creates a function that evaluates a vector of varied parameters and returns a vector of all the parameters
+    """
+    function resolve_parameters(ps::Parameters)
+        
+        inputs = [p for p in values(ps) if typeof(p) <: Parameter]
+        constants = [p for p in values(ps) if typeof(p) <: Constant]
+        expressions = [p for p in values(ps) if typeof(p) <: Expression]
+
+        # we take a vector of parameters
+        prog = "(params) -> begin\n"
+
+        # we unpack the adjustable parameters into their associated variables
+        lines = ["   $(p.name) = params[$(i)]\n" for (i, p) in enumerate(inputs)]
+        prog *= join(lines)
+        prog *= "\n"
+
+        # we unpack the constant parameters into their associated variables
+        lines = ["   $(p.name) = $(p.value)\n" for (i, p) in enumerate(constants)]
+        prog *= join(lines)
+        prog *= "\n"
+
+        # we unpack the expression parameters into their associated variables
+        lines = ["   $(p.name) = $(string(p.expr))\n" for (i, p) in enumerate(expressions)]
+        prog *= join(lines)
+        prog *= "\n"
+
+        # we pack these up into a single array
+        prog *= "   result = Vector{Float64}(undef, $(length(ps)))\n"
+        lines = ["   result[$(i)] = $(p.name)\n" for (i, p) in enumerate(values(ps))]
+        prog *= join(lines)
+        prog *= "\n"
+        
+        prog *= "   return result\n" 
+        prog *= "end"
+
+        body = Meta.parse(prog)
+
+        eval(body)
+    end
+
 end

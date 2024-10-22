@@ -5,15 +5,12 @@ In writing this I copied much about the python version, but using Symbols to lab
 """
 module LMfit
 
-
 using LsqFit
-using ExprTools
-using OrderedCollections
 
 # In the future this will be split into several files, but for now I will develop in the main module
 
 export Constant, Parameter, Expression, Parameters, Model, FitModel
-export add!, update_vars!, find_dependencies!, make_params, fit
+export add!, update_vars!, make_params, fit
 export @generate_model
 
 #
@@ -22,337 +19,13 @@ export @generate_model
 
 # Definition of individal parameter class
 include("parameter_objects.jl")
-import .ParameterObjects: AbstractParameter, Parameter, Constant, Expression, IndependentVariable, validate, PARAMETERS
-import .ParameterObjects: depends_on
+import .ParameterObjects: Parameter, Constant, Expression, IndependentVariable, Parameters
+import .ParameterObjects: validate, add!, find_dependencies!, resolve_parameters
 
-#=
-.########.....###....########.....###....##.....##.########.########.########.########...######.
-.##.....##...##.##...##.....##...##.##...###...###.##..........##....##.......##.....##.##....##
-.##.....##..##...##..##.....##..##...##..####.####.##..........##....##.......##.....##.##......
-.########..##.....##.########..##.....##.##.###.##.######......##....######...########...######.
-.##........#########.##...##...#########.##.....##.##..........##....##.......##...##.........##
-.##........##.....##.##....##..##.....##.##.....##.##..........##....##.......##....##..##....##
-.##........##.....##.##.....##.##.....##.##.....##.########....##....########.##.....##..######.
-=#
+# Definition of individal parameter class
+include("model_objects.jl")
+import .ModelObjects: Model, update_vars!, @generate_model, make_params, _strip_vars_kwargs
 
-struct Parameters
-    parameters::OrderedDict{Symbol, AbstractParameter}
-end
-Parameters() = Parameters(OrderedDict{Symbol, Parameter}())
-Parameters(args...; kwargs...) = add!(Parameters(), args...; kwargs...)
-
-#
-# New methods for existing Base functions
-#
-
-function Base.getindex(ps::Parameters, indices...)
-    ps.parameters[indices...]
-end
-Base.iterate(ps::Parameters) = iterate(ps.parameters)
-Base.iterate(ps::Parameters, state) = iterate(ps.parameters, state)
-Base.keys(ps::Parameters) = keys(ps.parameters)
-Base.length(ps::Parameters) = length(ps.parameters)
-Base.values(ps::Parameters) = values(ps.parameters)
-Base.setindex!(ps::Parameters, value, key) = setindex!(ps.parameters, value, key)
-
-function Base.show(io::IO, ps::Parameters)
-    println(io, "Parameters:")
-    for p in values(ps.parameters)
-        println(io, "\t$(String(p))")
-    end
-end
-
-# New methods
-
-function add!(ps::Parameters, p::AbstractParameter)
-    ps.parameters[p.name] = p
-    ps
-end
-function add!(ps::Parameters, pvec::Vector{AbstractParameter})
-    for p in pvec
-        add!(ps, p)
-    end
-    ps
-end
-add!(ps::Parameters, name::Symbol, parameter_type::Symbol, args...; kwargs...) = add!(ps, PARAMETERS[parameter_type](name, args...; kwargs...))
-add!(ps::Parameters, name::Symbol, args...; kwargs...) = add!(ps::Parameters, name::Symbol, :parameter, args...; kwargs...) # default to a parameter
-
-"""
-    depends_on
-
-find all dependencies between parameters
-"""
-depends_on(ps::Parameters) = Dict(k=>depends_on(p) for (k, p) in ps)
-
-"""
-    validate
-
-check for error conditions
-"""
-function validate(ps::Parameters)
-    for (name, p) in ps
-        if name != p.name
-            error("item $(name): Parameters name-key must match name-field the associated record")
-        end
-
-        validate(p)
-    end
-end
-
-"""
-    find_dependencies!(ps::Parameters)
-
-This is a key part of the logic of this package.  It will iterate over the parameters to see if they are
-fully determined, and to check for error conditions such as circular dependencies.
-
-It will then resort the parameters in the order that they need to be resolved if there are no errors
-"""
-function find_dependencies!(ps::Parameters)
-
-    # Find dependencies
-    dependencies = depends_on(ps)
-
-    sorted_parameters = empty(ps.parameters) # create an empty version of ps.parameters
-
-    resolved_one = true
-    while resolved_one 
-        resolved_one = false
-
-        # find resolved dependencies
-        for (name, dep) in dependencies
-            if isempty(dep)
-                sorted_parameters[name] = ps[name]
-                delete!(dependencies, name)
-                resolved_one = true
-            end
-        end
-
-        # remove resolved variables from depends_on sets
-        for dep in values(dependencies)
-            for sorted in values(sorted_parameters)
-                delete!(dep, sorted.name)
-            end
-        end
-    end
-
-    if !isempty(dependencies)
-        error("Circular dependencies detected")
-    end
-
-    empty!(ps.parameters)
-    for (name, p) in sorted_parameters
-        ps.parameters[name] = p
-    end
-
-    return ps
-end
-
-"""
-Creates a function that evaluates a vector of varied parameters and returns a vector of all the parameters
-"""
-function resolve_parameters(ps::Parameters)
-    
-    inputs = [p for p in values(ps) if typeof(p) <: Parameter]
-    constants = [p for p in values(ps) if typeof(p) <: Constant]
-    expressions = [p for p in values(ps) if typeof(p) <: Expression]
-
-     # we take a vector of parameters
-    prog = "(params) -> begin\n"
-
-    # we unpack the adjustable parameters into their associated variables
-    lines = ["   $(p.name) = params[$(i)]\n" for (i, p) in enumerate(inputs)]
-    prog *= join(lines)
-    prog *= "\n"
-
-    # we unpack the constant parameters into their associated variables
-    lines = ["   $(p.name) = $(p.value)\n" for (i, p) in enumerate(constants)]
-    prog *= join(lines)
-    prog *= "\n"
-
-    # we unpack the expression parameters into their associated variables
-    lines = ["   $(p.name) = $(string(p.expr))\n" for (i, p) in enumerate(expressions)]
-    prog *= join(lines)
-    prog *= "\n"
-
-    # we pack these up into a single array
-    prog *= "   result = Vector{Float64}(undef, $(length(ps)))\n"
-    lines = ["   result[$(i)] = $(p.name)\n" for (i, p) in enumerate(values(ps))]
-    prog *= join(lines)
-    prog *= "\n"
-    
-    prog *= "   return result\n" 
-    prog *= "end"
-
-    body = Meta.parse(prog)
-
-    eval(body)
-end
-
-#=
-.##.....##..#######..########..########.##......
-.###...###.##.....##.##.....##.##.......##......
-.####.####.##.....##.##.....##.##.......##......
-.##.###.##.##.....##.##.....##.######...##......
-.##.....##.##.....##.##.....##.##.......##......
-.##.....##.##.....##.##.....##.##.......##......
-.##.....##..#######..########..########.########
-=#
-
-"""
-Model
-
-Wraps a function of some paramters into something of the form that a fitter will accept
-
-Owing to the multiple dispatch nature of Julia, argument names cannot be identified without a function call.
-
-var_names are the names of the independent variables
-"""
-mutable struct Model
-    name::String
-    func::Function
-    arg_names::Vector{Symbol} # args in order
-    kwarg_names::Vector{Symbol} # kwargs in order
-    var_names::OrderedDict{Symbol, Int} # Independent variables (in order), pointing to their location in arg_names
-    param_names::OrderedDict{Symbol, Int} # Parameters (in order), pointing to their location in arg_names
-end
-function Model(name::String, func::Function, arg_names::Vector{Symbol}, kwarg_names::Vector{Symbol}; varnames=[])
-
-    if !allunique(kwarg_names)
-        error("kwarg_names must be unique")
-    end
-
-    if !allunique(arg_names)
-        error("arg_names must be unique")
-    end
-
-    param_names = OrderedDict(k => v for (v, k) in enumerate(arg_names))
-
-    m = Model(name, func, arg_names, kwarg_names, OrderedDict{Symbol, Int}(), param_names)
-
-    # to reuse logic we now update the var_names
-    update_vars!(m, varnames...)
-end
-"""
-Allow the model to be evaluated given a set of parameters, or just a vector of numerical values for the parameters
-
-x is a vector/tuple/whatever of independent variables
-"""
-(m::Model)(ps::Parameters; kwargs...) = m([ps[name].value for (name, _) in m.param_names];  kwargs...) # generate list of paramteres, ordered as expected
-
-"""
-p is a vector of parameter _values_
-kwargs contains the independent (i.e., x, y, ... variables) with keys equal to their names
-"""
-function (m::Model)(p::Vector; kwargs...)
-
-    (vars, not_vars) = strip_vars_kwargs(m, kwargs)
-
-    if length(p) != length(m.param_names)
-        error("p must be same length as Model.param_names")
-    end
-
-    args = Vector{Any}(undef, length(m.arg_names))
-    for ( (_, index), param) in zip(m.param_names, p)
-        args[index] = param
-    end
-
-    # Get independent variables
-    for (name, index) in m.var_names
-        args[index] = vars[name]
-    end
-
-    m.func(args...; not_vars...)
-end
-
-"""
-update_vars!(m::Model, var_names)
-
-Update the independent variables of the model
-"""
-function update_vars!(m::Model, var_names...)
-
-    if !allunique(var_names)
-        error("var_names must be unique")
-    end
-
-    if !(var_names ⊆ m.arg_names)
-        error("var_names=$(var_names) must be a subset of model.arg_names = $(m.arg_names)")
-    end
-
-    var_indices = indexin(var_names, m.arg_names)
-    m.var_names = OrderedDict(k => v for (k, v) in zip(var_names, var_indices) )
-
-    # Make a dict of what is left over
-    m.param_names = OrderedDict(k => v for (v, k) in enumerate(m.arg_names) if !haskey(m.var_names, k) )
-
-    m
-end
-
-"""
-    @generate_model func
-
-This macro grabs the information needed for an lmfit model from a function definition.  I need a macro to
-do the required introspection in Julia.
-"""
-macro generate_model(defun)
-    def = splitdef(defun)
-    name = def[:name]
-    args = get(def, :args, [])
-    kwargs = get(def, :kwargs, [])
-
-    # because I there are two types of results possible as in args = Any[:(x::Float64), :amp, :cen, :wid]
-    arg_names::Vector{Symbol} = [isa(arg, Expr) ? arg.args[1] : arg for arg in args]
-
-    # because kwargs looks like Any[:($(Expr(:kw, :offset, 0.0))), :($(Expr(:kw, :cat, 2.0)))])
-    kwarg_names::Vector{Symbol} = [isa(arg, Expr) ? arg.args[1] : arg for arg in kwargs]
-
-    # Surround the original body with @info messages
-    wrapped = quote
-        $defun
-        Model($(String(name)), $name, $arg_names, $kwarg_names)
-    end
-
-    # Recombine the function definition and output it (escaped!)
-    esc(wrapped)
-end
-
-"""
-make_params(m::Model)
-
-make parameters for the model
-
-kwargs are default values
-"""
-function make_params(m::Model; kwargs...)
-    ps = Parameters()
-
-    for param in keys(m.param_names)
-        value = haskey(kwargs, param) ? kwargs[param] : -Inf
-        add!(ps, param; value=value)
-    end
-
-    return ps
-end
-
-"""
-strip_vars_kwargs(m::Model, kwargs)
-
-kwargs can contain a mixture of model variables and other flags, so we will strip them out
-
-returns split out named tuples ()
-"""
-function strip_vars_kwargs(m::Model, kwargs)
-
-    if !(keys(m.var_names) ⊆ keys(kwargs))
-        error("keys(m.var_names) = $(keys(m.var_names)) must be a subset of kwargs = $(keys(kwargs))")
-    end
-
-    vars = pairs(NamedTuple( k=>kwargs[k] for k in keys(m.var_names) ))
-    not_vars = pairs(NamedTuple( k=>v for (k, v) in kwargs if !haskey(m.var_names, k) ))
-
-    return (vars, not_vars)
-
-end
 #=
 .########.####.########....##.....##..#######..########..########.##......
 .##........##.....##.......###...###.##.....##.##.....##.##.......##......
@@ -377,7 +50,7 @@ struct FitModel
 end
 function FitModel(m::Model, ps::Parameters; kwargs...) # kwargs are the x variables
     # Organize the independent variables
-    (vars, not_vars) = strip_vars_kwargs(m, kwargs)
+    (vars, not_vars) = _strip_vars_kwargs(m, kwargs)
 
     # convert to a dict
     vars = Dict(vars)
@@ -432,8 +105,6 @@ function fit(m::Model, ydata, ps::Parameters; kwargs...)
     lb = [p.min for (_, p) in fm.ps if typeof(p) <: Parameter]
     ub = [p.max for (_, p) in fm.ps if typeof(p) <: Parameter]
    
-    println("p0 = $([typeof(p) for (_, p) in fm.ps])")
-
     # do curve fit
     result = curve_fit(fm, [], ydata[:], p0, lower=lb, upper=ub)
 
