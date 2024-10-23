@@ -62,7 +62,7 @@ function FitModel(m::Model, ps::Parameters; kwargs...) # kwargs are the x variab
     # convert to a dict
     vars = Dict(vars)
 
-    ps_fit = deepcopy(ps)
+    ps_fit = Parameters(ps) # create a copy so we don't change the origional data
     validate(ps_fit)
 
     # Sort the parameters in order that they need to be determined

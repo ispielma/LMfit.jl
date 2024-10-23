@@ -19,6 +19,8 @@ module ParameterObjects
     in terms of a base class
     """
     abstract type AbstractParameter end
+    AbstractParameter(p::AbstractParameter) = deepcopy(p)
+    
     function AbstractParameter(name; kwargs...) # dispatch to the desired type of parameter
 
         if get(kwargs, :independent, false) == true
