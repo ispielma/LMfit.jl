@@ -20,7 +20,7 @@ module ParameterObjects
     """
     abstract type AbstractParameter end
     AbstractParameter(p::AbstractParameter) = deepcopy(p)
-    
+
     function AbstractParameter(name; kwargs...) # dispatch to the desired type of parameter
 
         if get(kwargs, :independent, false) == true
@@ -151,6 +151,7 @@ module ParameterObjects
     struct Parameters
         parameters::OrderedDict{Symbol, AbstractParameter}
     end
+    Parameters(ps::Parameters) = deepcopy(ps)
     Parameters() = Parameters(OrderedDict{Symbol, Parameter}())
     Parameters(args...; kwargs...) = add!(Parameters(), args...; kwargs...)
 
