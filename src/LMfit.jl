@@ -25,7 +25,7 @@ export coef, confint, dof, nobs, rss, stderror, weights, residuals, vcov, mse, i
 # Definition of individal parameter class
 include("parameter_objects.jl")
 import .ParameterObjects: Parameter, Constant, Expression, IndependentVariable, Parameters
-import .ParameterObjects: validate, add!, find_dependencies!, resolve_parameters
+import .ParameterObjects: validate, add!, find_dependencies!, resolve_parameters, _update_params_from_vect!
 
 # Definition of individal parameter class
 include("model_objects.jl")
@@ -53,6 +53,7 @@ struct FitModel
 
     # Internal "private" fields
     _params_exposed_names::Vector{Symbol} # Parameters exposed to LsqFit
+    _num_params_exposed::Int # Number of exposed free paramteres note that because parameters can be vectors this is not always the number of exposed parameters
     _vect_to_params::Function # a function that takes the exposed parameters as a vector and returns the parameters in the right order
 end
 function FitModel(m::Model, ps::Parameters; kwargs...) # kwargs are the x variables
@@ -68,26 +69,26 @@ function FitModel(m::Model, ps::Parameters; kwargs...) # kwargs are the x variab
     # Sort the parameters in order that they need to be determined
     find_dependencies!(ps_fit)
 
-    # Get the names of the parameters that are exposed to LsqFit
+    # Get the names and number the parameters that are exposed to LsqFit
     params_exposed_names::Vector{Symbol} = [name for (name, p) in ps_fit if typeof(p) <: Parameter]
+    num_params_exposed = sum(length(ps_fit[name]) for name in params_exposed_names)
 
     # Get the mapping function
     vect_to_params = resolve_parameters(ps_fit)
 
-    FitModel(m, ps_fit, vars, params_exposed_names, vect_to_params)
+    FitModel(m, ps_fit, vars, params_exposed_names, num_params_exposed, vect_to_params)
 end
 
 function(f::FitModel)(x, p) # x is there only because it is required for the curve_fit function
-    if length(p) != length(f._params_exposed_names)
-        error("length of p must be the same length of the number of exposed parameters")
+    if length(p) != f._num_params_exposed
+        println(p)
+        error("length of p=$(length(p)) must be the same length of the number of exposed parameters = $(f._num_params_exposed)")
     end
 
     # update parameters
     params = @invokelatest f._vect_to_params(p)
 
-    for (p, value) in zip(values(f.ps_fit), params)
-        p.value = value
-    end
+    _update_params_from_vect!(f.ps_fit, params)
 
     # evaluate function and flatten the output
     return f.m(f.ps_fit; f.var_data...)[:]
@@ -143,9 +144,9 @@ function fit(m::Model, ydata::AbstractArray, wt, ps::Parameters; kwargs...)
     fm = FitModel(m, ps; vars...)
 
     # Obtain vector of initial parameters and bounds
-    p0 = [p.value for (_, p) in fm.ps_fit if typeof(p) <: Parameter]
-    lb = [p.min for (_, p) in fm.ps_fit if typeof(p) <: Parameter]
-    ub = [p.max for (_, p) in fm.ps_fit if typeof(p) <: Parameter]
+    p0 = vcat([p.value for (_, p) in fm.ps_fit if typeof(p) <: Parameter]...)
+    lb = vcat([p.min for (_, p) in fm.ps_fit if typeof(p) <: Parameter]...)
+    ub = vcat([p.max for (_, p) in fm.ps_fit if typeof(p) <: Parameter]...)
 
     # do curve fit
     if wt===nothing
@@ -156,15 +157,11 @@ function fit(m::Model, ydata::AbstractArray, wt, ps::Parameters; kwargs...)
 
     params = @invokelatest fm._vect_to_params(result.param)
     
-    for (p, value) in zip(values(fm.ps_fit), params)
-        p.value = value
-    end
+    println(params)
 
-    mr = ModelResult(fm.m, ps, fm.ps_fit, size(ydata), result)
+    _update_params_from_vect!(fm.ps_fit, params)
 
-    # return mr.ps_best
-    return mr
+    ModelResult(fm.m, ps, fm.ps_fit, size(ydata), result)
 end
-
 
 end # end of module

@@ -9,7 +9,7 @@ module ParameterObjects
 
 
     export AbstractParameter, Constant, Parameter, Expression, IndependentVariable
-    export validate, depends_on
+    export validate, depends_on, _update_params_from_vect!
     export PARAMETERS
 
     """
@@ -31,7 +31,7 @@ module ParameterObjects
     end
     validate(p::AbstractParameter) = nothing
     depends_on(p::AbstractParameter) = Set{Symbol}()
-    
+    Base.length(p::AbstractParameter) = length(p.value)
 
     function Base.show(io::IO, p::AbstractParameter) 
         println(io, String(p))
@@ -62,7 +62,17 @@ module ParameterObjects
         min::T
         max::T
     end
-    Parameter(name::Symbol; value=NaN, min=-Inf, max=Inf) = Parameter(name, value, min, max)
+    function Parameter(name::Symbol; value=NaN, min=nothing, max=nothing)
+        if max === nothing
+            max = value .* (Inf)
+        end
+
+        if min === nothing
+            min = value .* (-Inf)
+        end
+
+        Parameter(name, value, min, max)
+    end
     function Parameter(name::Symbol, arg)
         println("Parameter: name=$(name),\targ=$(arg)")
     end
@@ -70,13 +80,18 @@ module ParameterObjects
     Base.String(p::Parameter) = "Parameter: name=$(p.name),\tvalue=$(p.value),\tmin=$(p.min),\tmax=$(p.max)"
 
     function validate(p::Parameter)
-        if p.min >= p.max
-            error("item $(name): p.min must be less than p.max")
+        if length(p) != length(p.min) || length(p) != length(p.max)
+            error("item $(p.name): length of all values and limit variables must be the same")
         end
 
-        if p.value >= p.max || p.value <= p.min
-            error("item $(name): p.value must be between p.min and p.max")
+        if any(min > max for (min, max) in zip(p.min, p.max))
+            error("item $(p.name): p.min = $(p.min) must be less than p.max = $(p.max)")
         end
+
+        if any((value > max || value < min) for (min, max, value) in zip(p.min, p.max, p.value))
+            error("item $(p.name): p.value = $(p.value) must be between p.min=$(p.min) and p.max=$(p.max)")
+        end
+        true
     end
 
 
@@ -215,6 +230,7 @@ module ParameterObjects
 
             validate(p)
         end
+        return true
     end
 
     """
@@ -278,8 +294,13 @@ module ParameterObjects
         prog = "(params) -> begin\n"
 
         # we unpack the adjustable parameters into their associated variables
-        lines = ["   $(p.name) = params[$(i)]\n" for (i, p) in enumerate(inputs)]
-        prog *= join(lines)
+        i = 1
+        for p in inputs
+            len = length(p)
+            line = "   $(p.name) = params[$(i):$(i+len-1)]\n"
+            prog *= line
+            i += len
+        end
         prog *= "\n"
 
         # we unpack the constant parameters into their associated variables
@@ -288,22 +309,48 @@ module ParameterObjects
         prog *= "\n"
 
         # we unpack the expression parameters into their associated variables
-        lines = ["   $(p.name) = $(string(p.expr))\n" for (i, p) in enumerate(expressions)]
+        lines = ["   $(p.name) = @. $(string(p.expr))\n" for (i, p) in enumerate(expressions)]
         prog *= join(lines)
         prog *= "\n"
 
         # we pack these up into a single array
-        prog *= "   result = Vector{Float64}(undef, $(length(ps)))\n"
-        lines = ["   result[$(i)] = $(p.name)\n" for (i, p) in enumerate(values(ps))]
+        prog *= "   result::Vector{Float64} = vcat("
+        lines = ["$(p.name), " for (_, p) in enumerate(values(ps))]
         prog *= join(lines)
-        prog *= "\n"
+        prog *= ")\n"
+        # prog *= "println(result)\n"
         
         prog *= "   return result\n" 
         prog *= "end"
 
+        # println(prog)
+
         body = Meta.parse(prog)
 
         eval(body)
+    end
+
+    """
+        _update_params_from_vect!(ps::Parameters, params_vect)
+    
+    Update parameters from the entries provided in params_vect
+
+    This assumes that the parameters are ordered in the same way as the params_vect,
+    and that total lengths are compatable
+    """
+    function _update_params_from_vect!(ps::Parameters, params_vect)
+        index = 1
+        for p in values(ps)
+            if typeof(p.value) <: Number
+                len = 1
+                p.value = params_vect[index]
+            else
+                len = length(p)
+                p.value = params_vect[index:index+len-1]
+            end
+            index += len
+        end
+        ps
     end
 
 end
