@@ -50,13 +50,14 @@ struct FitModel
     m::Model
     ps_fit::Parameters
     var_data::Dict{Symbol, Any} # Independent, i.e., x variables in the same order as keys are
+    kwargs::Dict{Symbol, Any} # keyword arguments to passed into the function
 
     # Internal "private" fields
     _params_exposed_names::Vector{Symbol} # Parameters exposed to LsqFit
     _num_params_exposed::Int # Number of exposed free paramteres note that because parameters can be vectors this is not always the number of exposed parameters
     _vect_to_params::Function # a function that takes the exposed parameters as a vector and returns the parameters in the right order
 end
-function FitModel(m::Model, ps::Parameters; kwargs...) # kwargs are the x variables
+function FitModel(m::Model, ps::Parameters; key_args=Dict(), kwargs...) # kwargs are the x variables
     # Organize the independent variables
     (vars, not_vars) = _strip_vars_kwargs(m, kwargs)
 
@@ -76,7 +77,7 @@ function FitModel(m::Model, ps::Parameters; kwargs...) # kwargs are the x variab
     # Get the mapping function
     vect_to_params = resolve_parameters(ps_fit)
 
-    FitModel(m, ps_fit, vars, params_exposed_names, num_params_exposed, vect_to_params)
+    FitModel(m, ps_fit, vars, key_args, params_exposed_names, num_params_exposed, vect_to_params)
 end
 
 function(f::FitModel)(x, p) # x is there only because it is required for the curve_fit function
@@ -91,7 +92,7 @@ function(f::FitModel)(x, p) # x is there only because it is required for the cur
     _update_params_from_vect!(f.ps_fit, params)
 
     # evaluate function and flatten the output
-    return f.m(f.ps_fit; f.var_data...)[:]
+    return f.m(f.ps_fit; f.var_data..., f.kwargs...)[:]
 end
 
 """
@@ -134,14 +135,14 @@ via the name of keyword arguments:
 
 so x=x would indicate that the name of the parameter in the function is actually x.
 """
-fit(m::Model, ydata::AbstractArray, ps::Parameters; kwargs...) = fit(m::Model, ydata, nothing, ps::Parameters; kwargs...) # TODO: need a nicer way to the weights
+fit(m::Model, ydata::AbstractArray, ps::Parameters; key_args...) = fit(m::Model, ydata, nothing, ps::Parameters; key_args...) # TODO: need a nicer way to the weights
 
-function fit(m::Model, ydata::AbstractArray, wt, ps::Parameters; kwargs...)
+function fit(m::Model, ydata::AbstractArray, wt, ps::Parameters; kwargs=Dict(), key_args...)
 
     # Organize the independent variables
-    (vars, not_vars) = _strip_vars_kwargs(m, kwargs)
+    (vars, not_vars) = _strip_vars_kwargs(m, key_args)
 
-    fm = FitModel(m, ps; vars...)
+    fm = FitModel(m, ps; vars..., kwargs...)
 
     # Obtain vector of initial parameters and bounds
     p0 = vcat([p.value for (_, p) in fm.ps_fit if typeof(p) <: Parameter]...)
@@ -157,8 +158,6 @@ function fit(m::Model, ydata::AbstractArray, wt, ps::Parameters; kwargs...)
 
     params = @invokelatest fm._vect_to_params(result.param)
     
-    println(params)
-
     _update_params_from_vect!(fm.ps_fit, params)
 
     ModelResult(fm.m, ps, fm.ps_fit, size(ydata), result)
