@@ -5,6 +5,8 @@ In writing this I copied much about the python version, but using Symbols to lab
 """
 module LMfit
 
+using OrderedCollections
+
 using LsqFit
 using LsqFit: LsqFitResult
 using StatsAPI
@@ -24,7 +26,7 @@ export coef, confint, dof, nobs, rss, stderror, weights, residuals, vcov, mse, i
 
 # Definition of individal parameter class
 include("parameter_objects.jl")
-import .ParameterObjects: Parameter, Constant, Expression, IndependentVariable, Parameters
+import .ParameterObjects: AbstractParameter, AbstractIndependentParameter, Parameter, ParameterWithUncertanty, Constant, Expression, IndependentVariable, Parameters
 import .ParameterObjects: validate, add!, find_dependencies!, resolve_parameters, _update_params_from_vect!
 
 # Definition of individal parameter class
@@ -57,9 +59,9 @@ struct FitModel
     _num_params_exposed::Int # Number of exposed free paramteres note that because parameters can be vectors this is not always the number of exposed parameters
     _vect_to_params::Function # a function that takes the exposed parameters as a vector and returns the parameters in the right order
 end
-function FitModel(m::Model, ps::Parameters; key_args=Dict(), kwargs...) # kwargs are the x variables
+function FitModel(m::Model, ps::Parameters; kwargs=Dict(), key_args...) # kwargs are the x variables
     # Organize the independent variables
-    (vars, not_vars) = _strip_vars_kwargs(m, kwargs)
+    (vars, not_vars) = _strip_vars_kwargs(m, key_args)
 
     # convert to a dict
     vars = Dict(vars)
@@ -71,13 +73,13 @@ function FitModel(m::Model, ps::Parameters; key_args=Dict(), kwargs...) # kwargs
     find_dependencies!(ps_fit)
 
     # Get the names and number the parameters that are exposed to LsqFit
-    params_exposed_names::Vector{Symbol} = [name for (name, p) in ps_fit if typeof(p) <: Parameter]
+    params_exposed_names::Vector{Symbol} = [name for (name, p) in ps_fit if typeof(p) <: AbstractIndependentParameter]
     num_params_exposed = sum(length(ps_fit[name]) for name in params_exposed_names)
 
     # Get the mapping function
     vect_to_params = resolve_parameters(ps_fit)
 
-    FitModel(m, ps_fit, vars, key_args, params_exposed_names, num_params_exposed, vect_to_params)
+    FitModel(m, ps_fit, vars, kwargs, params_exposed_names, num_params_exposed, vect_to_params)
 end
 
 function(f::FitModel)(x, p) # x is there only because it is required for the curve_fit function
@@ -89,7 +91,7 @@ function(f::FitModel)(x, p) # x is there only because it is required for the cur
     # update parameters
     params = @invokelatest f._vect_to_params(p)
 
-    _update_params_from_vect!(f.ps_fit, params)
+    _update_params_from_vect!(f.ps_fit, :value, params)
 
     # evaluate function and flatten the output
     return f.m(f.ps_fit; f.var_data..., f.kwargs...)[:]
@@ -105,6 +107,24 @@ struct ModelResult
     ps_best::Parameters
     size::Tuple{Vararg{Int}}
     lfr::LsqFit.LsqFitResult
+    function ModelResult(m::Model, ps_init::Parameters, ps_fit::Parameters, size::Tuple{Vararg{Int}}, lfr::LsqFit.LsqFitResult)
+
+        ps_best = Parameters()
+        # set the order of the best parameters to match the initial, user provided order
+        for p in values(ps_fit)
+            if typeof(p) <: AbstractIndependentParameter
+                # Inject uncertanties
+                add!(ps_best, ParameterWithUncertanty(p))
+            else
+                add!(ps_best, p)
+            end
+        end
+
+        # Update the uncertanties.  Notice that we are using the ordering provided by ps_fit
+        _update_params_from_vect!(ps_best, :σ, keys(ps_fit), stderror(lfr) )
+
+        new(m, ps_init, ps_best, size, lfr)
+    end
 end
 
 function Base.show(io::IO, mr::ModelResult)
@@ -122,7 +142,7 @@ StatsAPI.residuals(mr::ModelResult) = reshape(residuals(mr.lfr), mr.size...)
 StatsAPI.vcov(mr::ModelResult) = vcov(mr.lfr)
 StatsAPI.stderror(mr::ModelResult) = stderror(mr.lfr)
 StatsAPI.confint(mr::ModelResult; kwargs...) = confint(mr.lfr; kwargs...)
-mse(mr::ModelResult) = mse(mr.lfr)
+mse(mr::ModelResult) = LsqFit.mse(mr.lfr)
 isconverged(mr::ModelResult) = isconverged(mr.lfr)
 
 
@@ -142,12 +162,12 @@ function fit(m::Model, ydata::AbstractArray, wt, ps::Parameters; kwargs=Dict(), 
     # Organize the independent variables
     (vars, not_vars) = _strip_vars_kwargs(m, key_args)
 
-    fm = FitModel(m, ps; vars..., kwargs...)
+    fm = FitModel(m, ps; vars..., kwargs)
 
     # Obtain vector of initial parameters and bounds
-    p0 = vcat([p.value for (_, p) in fm.ps_fit if typeof(p) <: Parameter]...)
-    lb = vcat([p.min for (_, p) in fm.ps_fit if typeof(p) <: Parameter]...)
-    ub = vcat([p.max for (_, p) in fm.ps_fit if typeof(p) <: Parameter]...)
+    p0 = vcat([p.value for (_, p) in fm.ps_fit if typeof(p) <: AbstractIndependentParameter]...)
+    lb = vcat([p.min for (_, p) in fm.ps_fit if typeof(p) <: AbstractIndependentParameter]...)
+    ub = vcat([p.max for (_, p) in fm.ps_fit if typeof(p) <: AbstractIndependentParameter]...)
 
     # do curve fit
     if wt===nothing
@@ -158,7 +178,7 @@ function fit(m::Model, ydata::AbstractArray, wt, ps::Parameters; kwargs=Dict(), 
 
     params = @invokelatest fm._vect_to_params(result.param)
     
-    _update_params_from_vect!(fm.ps_fit, params)
+    _update_params_from_vect!(fm.ps_fit, :value, params)
 
     ModelResult(fm.m, ps, fm.ps_fit, size(ydata), result)
 end

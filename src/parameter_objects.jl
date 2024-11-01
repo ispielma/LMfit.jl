@@ -16,7 +16,7 @@ module ParameterObjects
     Parameters are the elemental components of the `LMfit` package.
 
     In order to improve my Julia programming, I am going to define the different kinds of possible parameters 
-    in terms of a base class
+    in terms of an abstract type
     """
     abstract type AbstractParameter end
     AbstractParameter(p::AbstractParameter) = deepcopy(p)
@@ -46,40 +46,18 @@ module ParameterObjects
     end
     Constant(name::Symbol; value=NaN) = Constant(name, value)
 
-    Base.String(p::Constant) = "Constant: name=$(p.name),\tvalue=$(p.value)"
-
+    Base.String(p::Constant) = "Constant: $(p.name)\n\tvalue=$(p.value)"
 
     """
-    Parameter
+    AbstractIndependentParameter
 
-    This is the elemental component of the `LMfit` package.
+    This is a second abstract type for quantities that are directly varied
 
-    The type T has to support Nan, Inf, and -Inf
+    This exists so I can create a subtype that also includes incertanties
     """
-    mutable struct Parameter{T} <: AbstractParameter
-        name::Symbol
-        value::T
-        min::T
-        max::T
-    end
-    function Parameter(name::Symbol; value=NaN, min=nothing, max=nothing)
-        if max === nothing
-            max = value .* (Inf)
-        end
+    abstract type  AbstractIndependentParameter <: AbstractParameter end
 
-        if min === nothing
-            min = value .* (-Inf)
-        end
-
-        Parameter(name, value, min, max)
-    end
-    function Parameter(name::Symbol, arg)
-        println("Parameter: name=$(name),\targ=$(arg)")
-    end
-
-    Base.String(p::Parameter) = "Parameter: name=$(p.name),\tvalue=$(p.value),\tmin=$(p.min),\tmax=$(p.max)"
-
-    function validate(p::Parameter)
+    function validate(p::AbstractIndependentParameter)
         if length(p) != length(p.min) || length(p) != length(p.max)
             error("item $(p.name): length of all values and limit variables must be the same")
         end
@@ -93,6 +71,65 @@ module ParameterObjects
         end
         true
     end
+
+    """
+    Parameter
+
+    This is the elemental component of the `LMfit` package.
+
+    The type T has to support Nan, Inf, and -Inf
+    """
+    mutable struct Parameter{T} <: AbstractIndependentParameter
+        name::Symbol
+        value::T
+        min::T
+        max::T
+    end
+    function Parameter(name::Symbol; value=NaN, min=nothing, max=nothing)
+        if max === nothing
+            max = typemax.(value)
+        end
+
+        if min === nothing
+            min = typemin.(value)
+        end
+
+        Parameter(name, value, min, max)
+    end
+    function Parameter(name::Symbol, arg)
+        println("Parameter: $(name),\targ=$(arg)")
+    end
+
+    Base.String(p::Parameter) = "Parameter: $(p.name)\n\tvalue=$(p.value)\n\tmin=$(p.min)\n\tmax=$(p.max)"
+
+    """
+    ParameterWithUncertanty
+
+    After performing a fit model parameters are replaced with this to show the fit untertanties
+    """
+    mutable struct ParameterWithUncertanty{T} <: AbstractIndependentParameter
+        name::Symbol
+        value::T
+        min::T
+        max::T
+        σ::T
+    end
+    function ParameterWithUncertanty(name::Symbol; value=NaN, min=nothing, max=nothing, σ=nothing)
+        if max === nothing
+            max = typemax.(value)
+        end
+
+        if min === nothing
+            min = typemin.(value)
+        end
+
+        if σ === nothing
+            σ = zero(value)
+        end
+
+        ParameterWithUncertanty(name, value, min, max, σ)
+    end
+    Base.String(p::ParameterWithUncertanty) = "Parameter with uncertainty: $(p.name)\n\tvalue=$(p.value)\n\tσ=$(p.σ)\n\tmin=$(p.min)\n\tmax=$(p.max)"
 
 
     """
@@ -109,7 +146,7 @@ module ParameterObjects
     end
     Expression(name::Symbol; expr=:(), value=NaN) = return Expression(name, value, expr)
 
-    Base.String(p::Expression) = "Expression: name=$(p.name),\tvalue=$(p.value),\texpr=$(p.expr)"
+    Base.String(p::Expression) = "Expression: $(p.name)\texpr=$(p.expr)\n\tvalue=$(p.value)"
 
     depends_on(p::Expression) = _get_symbols(p.expr)
   
@@ -124,7 +161,7 @@ module ParameterObjects
     function Base.show(io::IO, p::IndependentVariable) 
         println(io, String(p))
     end
-    Base.String(p::IndependentVariable) = "IndependentVariable: name=$(p.name)"
+    Base.String(p::IndependentVariable) = "IndependentVariable: $(p.name)"
 
     function _get_symbols(ex)
         list = []
@@ -144,14 +181,19 @@ module ParameterObjects
         )
 
     # Conversion tools
-    Constant(p::Parameter) = Constant(p.name, p.value)
+    Constant(p::AbstractIndependentParameter) = Constant(p.name, p.value)
     Constant(p::Expression) = Constant(p.name, p.value)
 
     Parameter(p::Constant; kwargs...) = Parameter(p.name; value=p.value, kwargs...)
+    Parameter(p::AbstractIndependentParameter; kwargs...) = Parameter(p.name; value=p.value, kwargs...)
     Parameter(p::Expression; kwargs...) = Parameter(p.name; value=p.value, min=p.min, max=p.max, kwargs...)
 
+    ParameterWithUncertanty(p::Constant; kwargs...) = ParameterWithUncertanty(p.name; value=p.value, kwargs...)
+    ParameterWithUncertanty(p::AbstractIndependentParameter; kwargs...) = ParameterWithUncertanty(p.name; value=p.value, kwargs...)
+    ParameterWithUncertanty(p::Expression; kwargs...) = ParameterWithUncertanty(p.name; value=p.value, min=p.min, max=p.max, kwargs...)
+
     Expression(p::Constant; kwargs...) = Expression(p.name; value=p.value, min=p.min, max=p.max, kwargs...)
-    Expression(p::Parameter; kwargs...) = Expression(p.name; value=p.value, kwargs...)
+    Expression(p::AbstractIndependentParameter; kwargs...) = Expression(p.name; value=p.value, kwargs...)
 
     #=
     .########.....###....########.....###....##.....##.########.########.########.########...######.
@@ -309,7 +351,7 @@ module ParameterObjects
         prog *= "\n"
 
         # we unpack the expression parameters into their associated variables
-        lines = ["   $(p.name) = @. $(string(p.expr))\n" for (i, p) in enumerate(expressions)]
+        lines = ["   $(p.name) = $(string(p.expr))\n" for (i, p) in enumerate(expressions)]
         prog *= join(lines)
         prog *= "\n"
 
@@ -335,22 +377,25 @@ module ParameterObjects
     
     Update parameters from the entries provided in params_vect
 
-    This assumes that the parameters are ordered in the same way as the params_vect,
-    and that total lengths are compatable
+    keys defines which parameters to update and aligns the order of the params_vect
+
+    When passed only a Parameters object,  assumes that the parameters are ordered in the same way as the params_vect
     """
-    function _update_params_from_vect!(ps::Parameters, params_vect)
+    function _update_params_from_vect!(ps::Parameters, field::Symbol, keys, params_vect)
         index = 1
-        for p in values(ps)
-            if typeof(p.value) <: Number
+        for k in keys
+            p = ps[k]
+            if typeof(getfield(p, field)) <: Number
                 len = 1
-                p.value = params_vect[index]
+                setfield!(p, field, params_vect[index])
             else
                 len = length(p)
-                p.value = params_vect[index:index+len-1]
+                setfield!(p, field, params_vect[index:index+len-1])
             end
             index += len
         end
         ps
     end
+    _update_params_from_vect!(ps::Parameters, field::Symbol, vect) = _update_params_from_vect!(ps, field, keys(ps), vect)
 
 end
