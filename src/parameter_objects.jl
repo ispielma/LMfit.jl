@@ -46,8 +46,10 @@ module ParameterObjects
     end
     Constant(name::Symbol; value=NaN) = Constant(name, value)
 
-    Base.String(p::Constant) = "Constant: $(p.name)\n\tvalue=$(p.value)"
-
+    function Base.String(p::Constant{T}) where T
+        s = _sep(T)
+        "Constant: $(p.name)$(s)value=$(p.value)"
+    end
     """
     AbstractIndependentParameter
 
@@ -100,8 +102,10 @@ module ParameterObjects
         println("Parameter: $(name),\targ=$(arg)")
     end
 
-    Base.String(p::Parameter) = "Parameter: $(p.name)\n\tvalue=$(p.value)\n\tmin=$(p.min)\n\tmax=$(p.max)\n"
-
+    function Base.String(p::Parameter{T}) where T
+        s = _sep(T)
+        "Parameter: $(p.name)$(s)value=$(p.value)$(s)min=$(p.min)$(s)max=$(p.max)"
+    end
     """
     ParameterWithUncertanty
 
@@ -129,8 +133,10 @@ module ParameterObjects
 
         ParameterWithUncertanty(name, value, min, max, σ)
     end
-    Base.String(p::ParameterWithUncertanty) = "Parameter with uncertainty: $(p.name)\n\tvalue=$(p.value)\n\tσ=$(p.σ)\n\tmin=$(p.min)\n\tmax=$(p.max)\n"
-
+    function Base.String(p::ParameterWithUncertanty{T}) where T
+        s = _sep(T)
+        "Parameter with uncertainty: $(p.name)$(s)value=$(p.value)$(s)σ=$(p.σ)$(s)min=$(p.min)$(s)max=$(p.max)"
+    end
 
     """
     Expression
@@ -146,7 +152,10 @@ module ParameterObjects
     end
     Expression(name::Symbol; expr=:(), value=NaN) = return Expression(name, value, expr)
 
-    Base.String(p::Expression) = "Expression: $(p.name)\texpr=$(p.expr)\n\tvalue=$(p.value)\n"
+    function Base.String(p::Expression{T}) where T
+        s = _sep(T)
+        "Expression: $(p.name)\texpr=$(p.expr)$(s)value=$(p.value)"
+    end
 
     depends_on(p::Expression) = _get_symbols(p.expr)
   
@@ -161,7 +170,7 @@ module ParameterObjects
     function Base.show(io::IO, p::IndependentVariable) 
         println(io, String(p))
     end
-    Base.String(p::IndependentVariable) = "IndependentVariable: $(p.name)\n"
+    Base.String(p::IndependentVariable) = "IndependentVariable: $(p.name)"
 
     function _get_symbols(ex)
         list = []
@@ -397,5 +406,8 @@ module ParameterObjects
         ps
     end
     _update_params_from_vect!(ps::Parameters, field::Symbol, vect) = _update_params_from_vect!(ps, field, keys(ps), vect)
+
+    _sep(T::Type) = T <: Number ? "\t" : "\n\t\t"
+
 
 end
