@@ -111,7 +111,8 @@ struct ModelResult
 
         ps_best = Parameters()
         # set the order of the best parameters to match the initial, user provided order
-        for p in values(ps_fit)
+        for k in keys(ps_init)
+            p = ps_fit[k]
             if typeof(p) <: AbstractIndependentParameter
                 # Inject uncertanties
                 add!(ps_best, ParameterWithUncertanty(p))
@@ -121,7 +122,8 @@ struct ModelResult
         end
 
         # Update the uncertanties.  Notice that we are using the ordering provided by ps_fit
-        _update_params_from_vect!(ps_best, :σ, keys(ps_fit), stderror(lfr) )
+        ks =  [k for (k, p) in ps_fit if typeof(p) <: AbstractIndependentParameter] # these are the keys for variables that were actually minimized
+        _update_params_from_vect!(ps_best, :σ, ks, stderror(lfr) )
 
         new(m, ps_init, ps_best, size, lfr)
     end

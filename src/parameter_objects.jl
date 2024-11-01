@@ -100,7 +100,7 @@ module ParameterObjects
         println("Parameter: $(name),\targ=$(arg)")
     end
 
-    Base.String(p::Parameter) = "Parameter: $(p.name)\n\tvalue=$(p.value)\n\tmin=$(p.min)\n\tmax=$(p.max)"
+    Base.String(p::Parameter) = "Parameter: $(p.name)\n\tvalue=$(p.value)\n\tmin=$(p.min)\n\tmax=$(p.max)\n"
 
     """
     ParameterWithUncertanty
@@ -129,7 +129,7 @@ module ParameterObjects
 
         ParameterWithUncertanty(name, value, min, max, σ)
     end
-    Base.String(p::ParameterWithUncertanty) = "Parameter with uncertainty: $(p.name)\n\tvalue=$(p.value)\n\tσ=$(p.σ)\n\tmin=$(p.min)\n\tmax=$(p.max)"
+    Base.String(p::ParameterWithUncertanty) = "Parameter with uncertainty: $(p.name)\n\tvalue=$(p.value)\n\tσ=$(p.σ)\n\tmin=$(p.min)\n\tmax=$(p.max)\n"
 
 
     """
@@ -146,7 +146,7 @@ module ParameterObjects
     end
     Expression(name::Symbol; expr=:(), value=NaN) = return Expression(name, value, expr)
 
-    Base.String(p::Expression) = "Expression: $(p.name)\texpr=$(p.expr)\n\tvalue=$(p.value)"
+    Base.String(p::Expression) = "Expression: $(p.name)\texpr=$(p.expr)\n\tvalue=$(p.value)\n"
 
     depends_on(p::Expression) = _get_symbols(p.expr)
   
@@ -161,7 +161,7 @@ module ParameterObjects
     function Base.show(io::IO, p::IndependentVariable) 
         println(io, String(p))
     end
-    Base.String(p::IndependentVariable) = "IndependentVariable: $(p.name)"
+    Base.String(p::IndependentVariable) = "IndependentVariable: $(p.name)\n"
 
     function _get_symbols(ex)
         list = []
