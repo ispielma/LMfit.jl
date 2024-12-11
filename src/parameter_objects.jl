@@ -6,6 +6,9 @@ All the logic for the individual parameter class
 module ParameterObjects
 
     using OrderedCollections
+    using SpecialFunctions # make special functions available to the fit
+    # TODO this suggests it might be smart to move the evaulator function
+    # Into its own module to keep the name space as clean as possible
 
 
     export AbstractParameter, Constant, Parameter, Expression, IndependentVariable
