@@ -36,4 +36,10 @@ In this context most fitting packages accept a `weights` argument of some sort, 
 
 Here, the `LMfit.jl` package reverses the non-standard conventions.
 
- Even aside these issues, having a single `weights` variable becomes problematic when one wants to apply a window function.  The reason for this is that a window function is designed to reject (and potentially re-weight) data for reasons other than the expected statistical uncertainty.  This has the important consequence of in effect reducing number of independent observations!
+ Even aside these issues, having a single `weights` variable becomes problematic when one wants to apply a window function $w_j$.  The reason for this is that a window function is designed to reject (and potentially re-weight) data for reasons other than the expected statistical uncertainty.  This has the important consequence of in effect reducing number of independent observations to the Kish effective sample size
+ $$
+ \begin{align}
+ N_{\rm eff} = \frac{(\sum_j w_j)^2}{\sum_j w_j^2}
+ \end{align}
+ $$
+ and changes $\mathrm{DoF} =  N_{\rm eff} - \mathrm{Dim}(\Lambda)$
