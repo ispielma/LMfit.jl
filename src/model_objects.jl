@@ -136,14 +136,23 @@ module ModelObjects
     end
 
     """
-        @generate_model func
+        @model funcdef
 
-    This macro grabs the information needed for an lmfit model from a function definition.  I need a macro to
-    do the required introspection in Julia.
+    Defines the function `funcdef` and then returns an `LMFit.Model` object.
+
+    Example:
+
+        g = @model function gaussian(x, amp, cen, wid; offset = 0)
+            amp * exp(-((x - cen)/wid)^2) .+ offset
+        end
+
+    Returns a `Model` object that can be used directly:
+
+        fit = lmfit(g, data)
     """
     macro generate_model(defun)
         def = splitdef(defun)
-        name = def[:name]
+        fname = def[:name]
         args = get(def, :args, [])
         kwargs = get(def, :kwargs, [])
 
@@ -153,14 +162,23 @@ module ModelObjects
         # because kwargs looks like Any[:($(Expr(:kw, :offset, 0.0))), :($(Expr(:kw, :cat, 2.0)))])
         kwarg_names::Vector{Symbol} = [isa(arg, Expr) ? arg.args[1] : arg for arg in kwargs]
 
-        # Surround the original body with @info messages
-        wrapped = quote
-            $defun
-            Model($name, $arg_names; kwarg_names=$kwarg_names)
+
+        # Build the quoted code: define function first, then build the model
+        quote
+            $(esc(fdef))  # Define the function exactly as written by user
+            Model($(esc(fname)), $(esc(arg_names)); kwarg_names = $(esc(kwarg_names)))
         end
 
-        # Recombine the function definition and output it (escaped!)
-        esc(wrapped)
+        # 
+        # Old version
+        #
+        # wrapped = quote
+        #     $defun
+        #     Model($fname, $arg_names; kwarg_names=$kwarg_names)
+        # end
+
+        # # Recombine the function definition and output it (escaped!)
+        # esc(wrapped)
     end
 
     """
