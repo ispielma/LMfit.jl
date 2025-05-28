@@ -150,8 +150,8 @@ module ModelObjects
 
         fit = lmfit(g, data)
     """
-    macro generate_model(defun)
-        def = splitdef(defun)
+    macro generate_model(fdef)
+        def = splitdef(fdef)
         fname = def[:name]
         args = get(def, :args, [])
         kwargs = get(def, :kwargs, [])
@@ -173,7 +173,7 @@ module ModelObjects
         # Old version
         #
         # wrapped = quote
-        #     $defun
+        #     $fdef
         #     Model($fname, $arg_names; kwarg_names=$kwarg_names)
         # end
 
