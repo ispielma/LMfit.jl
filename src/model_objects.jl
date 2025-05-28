@@ -136,19 +136,17 @@ module ModelObjects
     end
 
     """
-        @model funcdef
+        @generate_model fdef
 
-    Defines the function `funcdef` and then returns an `LMFit.Model` object.
+    Defines the function `fdef` and then returns an `LMFit.Model` object.
 
     Example:
 
-        g = @model function gaussian(x, amp, cen, wid; offset = 0)
+        g = @generate_model function gaussian(x, amp, cen, wid; offset = 0)
             amp * exp(-((x - cen)/wid)^2) .+ offset
         end
 
-    Returns a `Model` object that can be used directly:
-
-        fit = lmfit(g, data)
+    Returns a `Model` object.
     """
     macro generate_model(fdef)
         def = splitdef(fdef)
@@ -162,23 +160,11 @@ module ModelObjects
         # because kwargs looks like Any[:($(Expr(:kw, :offset, 0.0))), :($(Expr(:kw, :cat, 2.0)))])
         kwarg_names::Vector{Symbol} = [isa(arg, Expr) ? arg.args[1] : arg for arg in kwargs]
 
-
         # Build the quoted code: define function first, then build the model
         quote
             $(esc(fdef))  # Define the function exactly as written by user
             Model($(esc(fname)), $(esc(arg_names)); kwarg_names = $(esc(kwarg_names)))
         end
-
-        # 
-        # Old version
-        #
-        # wrapped = quote
-        #     $fdef
-        #     Model($fname, $arg_names; kwarg_names=$kwarg_names)
-        # end
-
-        # # Recombine the function definition and output it (escaped!)
-        # esc(wrapped)
     end
 
     """
