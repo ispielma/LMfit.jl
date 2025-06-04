@@ -115,18 +115,21 @@ module LMfit
         wt::W
 
         converged::Bool
-        # size::Tuple{Vararg{Int}}
-        size::NTuple{N,Int} where N 
+        size::Tuple{Vararg{Int}}
+        # size::NTuple{N,Int} where N 
 
-        _lfr::LsqFit.LsqFitResult
+        lfr::LsqFit.LsqFitResult
 
         function ModelResult(m::Model, 
             ps_init::Parameters, 
             ps_fit::Parameters, 
-            covar_inv::AbstractArray, 
-            wt::AbstractArray, 
-            size::NTuple{N,Int}, 
-            lfr::LsqFit.LsqFitResult) where N
+            resid::R,
+            jacobian::J,
+            covar_inv::T, 
+            wt::W, 
+            converged::Bool,
+            size::Tuple{Vararg{Int}}, 
+            lfr::LsqFit.LsqFitResult) where {R,J,W,T <: AbstractArray}
 
             ps_best = Parameters()
             # set the order of the best parameters to match the initial, user provided order
@@ -144,10 +147,11 @@ module LMfit
             ks_indep =  [k for (k, p) in ps_fit if p isa AbstractIndependentParameter] # these are the keys for variables that were actually minimized
             _update_params_from_vect!(ps_best, :σ, ks_indep, stderror(lfr) )
 
-            new(m, ps_init, ps_best, lfr.resid, lfr.jac, covar_inv, wt, lfr.converged, size, lfr)
+            new{R,J,W,T}(m, ps_init, ps_best, resid, jacobian, covar_inv, wt, converged, size, lfr)
         end
     end
-    ModelResult(ps::Parameters, fm::_FitModel, covar_inv, wt, size, result::LsqFit.LsqFitResult) = ModelResult(fm.m, ps, fm.ps_fit, covar_inv, wt, size, result)
+    ModelResult(m, ps_init, ps_fit, covar_inv, wt, size, lfr::LsqFit.LsqFitResult) = ModelResult(m, ps_init, ps_fit, lfr.resid, lfr.jacobian, covar_inv, wt, lfr.converged, size, lfr)
+    ModelResult(ps, fm::_FitModel, covar_inv, wt, size, lfr) = ModelResult(fm.m, ps, fm.ps_fit, covar_inv, wt, size, lfr)
 
     function Base.show(io::IO, mr::ModelResult)
         println(io, "ModelResult")
@@ -155,17 +159,17 @@ module LMfit
 
     end
 
-    StatsAPI.coef(mr::ModelResult) = coef(mr._lfr)
-    StatsAPI.nobs(mr::ModelResult) = nobs(mr._lfr)
-    StatsAPI.dof(mr::ModelResult) = dof(mr._lfr)
-    StatsAPI.rss(mr::ModelResult) = rss(mr._lfr)
-    StatsAPI.weights(mr::ModelResult) = weights(mr._lfr)
-    StatsAPI.residuals(mr::ModelResult) = reshape(residuals(mr._lfr), mr.size...)
-    StatsAPI.vcov(mr::ModelResult) = vcov(mr._lfr)
-    StatsAPI.stderror(mr::ModelResult) = stderror(mr._lfr)
-    StatsAPI.confint(mr::ModelResult; kwargs...) = confint(mr._lfr; kwargs...)
-    mse(mr::ModelResult) = LsqFit.mse(mr._lfr)
-    isconverged(mr::ModelResult) = isconverged(mr._lfr)
+    StatsAPI.coef(mr::ModelResult) = coef(mr.lfr)
+    StatsAPI.nobs(mr::ModelResult) = nobs(mr.lfr)
+    StatsAPI.dof(mr::ModelResult) = dof(mr.lfr)
+    StatsAPI.rss(mr::ModelResult) = rss(mr.lfr)
+    StatsAPI.weights(mr::ModelResult) = weights(mr.lfr)
+    StatsAPI.residuals(mr::ModelResult) = reshape(residuals(mr.lfr), mr.size...)
+    StatsAPI.vcov(mr::ModelResult) = vcov(mr.lfr)
+    StatsAPI.stderror(mr::ModelResult) = stderror(mr.lfr)
+    StatsAPI.confint(mr::ModelResult; kwargs...) = confint(mr.lfr; kwargs...)
+    mse(mr::ModelResult) = LsqFit.mse(mr.lfr)
+    isconverged(mr::ModelResult) = isconverged(mr.lfr)
 
 
     """
