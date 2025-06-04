@@ -7,9 +7,8 @@ module ParameterObjects
 
     using OrderedCollections
     using SpecialFunctions # make special functions available to the fit
-    # TODO this suggests it might be smart to move the evaulator function
+    # TODO this suggests it might be smart to move the evaluator function
     # Into its own module to keep the name space as clean as possible
-
 
     export AbstractParameter, Constant, Parameter, Expression, IndependentVariable
     export validate, depends_on, _update_params_from_vect!

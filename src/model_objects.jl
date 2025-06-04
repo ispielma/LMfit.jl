@@ -11,11 +11,12 @@ module ModelObjects
     import ..ParameterObjects: validate, add!, find_dependencies!, resolve_parameters
 
     """
-    Model
+        Model
 
-    Wraps a function of some paramters into something of the form that a fitter will accept
+    Wraps a function of some parameters into something of the form that the fitter accepts.
 
-    Owing to the multiple dispatch nature of Julia, argument names cannot be identified without a function call.
+    Unlike the Python LMFit, the multiple dispatch nature of Julia prevents the function signature
+    from being identified from a function reference.
 
     var_names are the names of the independent variables
     """
@@ -84,7 +85,7 @@ module ModelObjects
 
     x is a vector/tuple/whatever of independent variables
     """
-    (m::Model)(ps::Parameters; kwargs...) = m([ps[name].value for (name, _) in m.param_names];  kwargs...) # generate list of paramteres, ordered as expected
+    (m::Model)(ps::Parameters; kwargs...) = m([ps[name].value for (name, _) in m.param_names];  kwargs...) # generate list of parameters, ordered as expected
 
     """
     p is a vector of parameter _values_
@@ -112,7 +113,7 @@ module ModelObjects
     end
 
     """
-    update_vars!(m::Model, var_names)
+        update_vars!(m::Model, var_names)
 
     Update the independent variables of the model
     """
@@ -138,7 +139,7 @@ module ModelObjects
     """
         @generate_model fdef
 
-    Defines the function `fdef` and then returns an `LMFit.Model` object.
+    Defines the function `fdef` and returns an `LMFit.Model` object.
 
     Example:
 
@@ -168,7 +169,7 @@ module ModelObjects
     end
 
     """
-    make_params(m::Model)
+        make_params(m::Model)
 
     make parameters for the model
 
@@ -196,7 +197,7 @@ module ModelObjects
     end
 
     """
-    _strip_vars_kwargs(m::Model, kwargs)
+        _strip_vars_kwargs(m::Model, kwargs)
 
     kwargs can contain a mixture of model variables and other flags, so we will strip them out
 
