@@ -187,11 +187,10 @@ module LMfit
         assume χ^2 was supposed to be 1, and scale the covariance matrix accordingly (default is false).
     """
 
+    # Alias for old version where weight was an optional argument.
+    fit(m::Model, ydata::AbstractArray, wt::AbstractArray, ps::Parameters; key_args...) = fit(m, ydata, ps; wt=wt, key_args...)
+    
     function fit(m::Model, ydata::AbstractArray, ps::Parameters; kwargs=Dict(), covar_inv=nothing, wt=nothing, scale_covar=false, key_args...)
-
-        if wt !== nothing
-            error("wt not implemented yet")
-        end
 
         # Organize the independent variables
         (vars, not_vars) = _strip_vars_kwargs(m, key_args)
@@ -206,6 +205,7 @@ module LMfit
         #
         # do curve fit
         #
+
         y_flat = ydata[:]
 
         # Make lazily-allocated arrays full of 1.0 with the same shape as ydata
