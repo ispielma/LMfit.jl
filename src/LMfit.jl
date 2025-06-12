@@ -16,7 +16,7 @@ module LMfit
     # In the future this will be split into several files, but for now I will develop in the main module
 
     export Constant, Parameter, Expression, Parameters, Model
-    export add!, update_vars!, make_params, fit
+    export add!, update_vars!, make_params, fit, eval_uncertainty
     export @generate_model
 
     export coef, confint, dof, nobs, rss, stderror, weights, residuals, vcov, mse, isconverged
@@ -45,12 +45,12 @@ module LMfit
     =#
 
     """
-        _FitModel
+        FitModel
 
     A wrapped Model that can be evaluated using the syntax expected by LsqFit, this is 
     an internal object that is used only by fit()
     """
-    struct _FitModel
+    struct FitModel
         m::Model
         ps_fit::Parameters
         var_data::Dict{Symbol, Any} # Independent, i.e., x variables in the same order as keys are
@@ -61,7 +61,7 @@ module LMfit
         _num_params_exposed::Int # Number of exposed free parameters note that because parameters can be vectors this is not always the number of exposed parameters
         _vect_to_params::Function # a function that takes the exposed parameters as a vector and returns the parameters in the right order
     end
-    function _FitModel(m::Model, ps::Parameters; kwargs=Dict(), key_args...) # kwargs are the x variables
+    function FitModel(m::Model, ps::Parameters; kwargs=Dict(), key_args...) # kwargs are the x variables
         # Organize the independent variables
         (vars, not_vars) = _strip_vars_kwargs(m, key_args)
 
@@ -81,10 +81,28 @@ module LMfit
         # Get the mapping function
         vect_to_params = resolve_parameters(ps_fit)
 
-        _FitModel(m, ps_fit, vars, kwargs, params_exposed_names, num_params_exposed, vect_to_params)
+        FitModel(m, ps_fit, vars, kwargs, params_exposed_names, num_params_exposed, vect_to_params)
     end
 
-    function(f::_FitModel)(x, p) # x is there only because it is required for the curve_fit function
+    """
+        (f::FitModel)(x, p) = f(p; f.var_data...)
+
+    Callable method that uses the format expected by LsqFit
+
+    x is ignored, and is present only to match the call signature required by LsqFit
+    p is a vector of the exposed parameters
+    """
+    (f::FitModel)(x, p) = f(p; f.var_data...)[:] # flattened as expected by LsqFit
+
+    """
+        f::FitModel)(p; kwargs...)
+
+    Callable method that uses a format more similar to the remainder of this package where
+    independent variables are passed as keyword arguments
+
+    p is a vector of the exposed parameters as their native type, not Parameter objects.
+    """
+    function(f::FitModel)(p; kwargs...) # More canonical method where the independent variables are passed as keyword arguments
         if length(p) != f._num_params_exposed
             println(p)
             error("length of p=$(length(p)) must be the same length of the number of exposed parameters = $(f._num_params_exposed)")
@@ -95,8 +113,8 @@ module LMfit
 
         _update_params_from_vect!(f.ps_fit, :value, params)
 
-        # evaluate function and flatten the output
-        return f.m(f.ps_fit; f.var_data..., f.kwargs...)[:]
+        # evaluate function
+        return f.m(f.ps_fit; kwargs..., f.kwargs...)
     end
 
     """
@@ -106,6 +124,7 @@ module LMfit
     """
     struct ModelResult{R,J,W,T <: AbstractArray}
         m::Model
+        fm::FitModel
         ps_init::Parameters
         ps_best::Parameters
 
@@ -120,9 +139,10 @@ module LMfit
 
         lfr::LsqFit.LsqFitResult
 
-        function ModelResult(m::Model, 
+        function ModelResult(
+            m::Model,
+            fm::FitModel,
             ps_init::Parameters, 
-            ps_fit::Parameters, 
             resid::R,
             jacobian::J,
             covar_inv::T, 
@@ -132,6 +152,7 @@ module LMfit
             lfr::LsqFit.LsqFitResult) where {R,J,W,T <: AbstractArray}
 
             ps_best = Parameters()
+            ps_fit = fm.ps_fit
             # set the order of the best parameters to match the initial, user provided order
             for k in keys(ps_init)
                 p = ps_fit[k]
@@ -147,30 +168,78 @@ module LMfit
             ks_indep =  [k for (k, p) in ps_fit if p isa AbstractIndependentParameter] # these are the keys for variables that were actually minimized
             _update_params_from_vect!(ps_best, :σ, ks_indep, stderror(lfr) )
 
-            new{R,J,W,T}(m, ps_init, ps_best, resid, jacobian, covar_inv, wt, converged, size, lfr)
+            new{R,J,W,T}(m, fm, ps_init, ps_best, resid, jacobian, covar_inv, wt, converged, size, lfr)
         end
     end
-    ModelResult(m, ps_init, ps_fit, covar_inv, wt, size, lfr::LsqFit.LsqFitResult) = ModelResult(m, ps_init, ps_fit, lfr.resid, lfr.jacobian, covar_inv, wt, lfr.converged, size, lfr)
-    ModelResult(ps, fm::_FitModel, covar_inv, wt, size, lfr) = ModelResult(fm.m, ps, fm.ps_fit, covar_inv, wt, size, lfr)
+    ModelResult(fm::FitModel, ps_init, covar_inv, wt, size, lfr::LsqFit.LsqFitResult) = ModelResult(fm.m, fm, ps_init, reshape(lfr.resid, size...), lfr.jacobian, covar_inv, wt, lfr.converged, size, lfr)
+
+    # Model result evaluates to the best fit
+    # evaluate at the independent variables defined by kwargs...
+    (mr::ModelResult)(; kwargs...) = mr.m(mr.ps_best; kwargs...)
 
     function Base.show(io::IO, mr::ModelResult)
         println(io, "ModelResult")
         println(io, "$(mr.ps_best)")
-
     end
 
+    # Generally the statistics from LsqFit.jl is OK, but I need to update some of them.
     StatsAPI.coef(mr::ModelResult) = coef(mr.lfr)
-    StatsAPI.nobs(mr::ModelResult) = nobs(mr.lfr)
-    StatsAPI.dof(mr::ModelResult) = dof(mr.lfr)
     StatsAPI.rss(mr::ModelResult) = rss(mr.lfr)
-    StatsAPI.weights(mr::ModelResult) = weights(mr.lfr)
-    StatsAPI.residuals(mr::ModelResult) = reshape(residuals(mr.lfr), mr.size...)
+    StatsAPI.weights(mr::ModelResult) = mr.wt # Note that this is not the uncertainties
+    StatsAPI.residuals(mr::ModelResult) = mr.resid 
     StatsAPI.vcov(mr::ModelResult) = vcov(mr.lfr)
     StatsAPI.stderror(mr::ModelResult) = stderror(mr.lfr)
     StatsAPI.confint(mr::ModelResult; kwargs...) = confint(mr.lfr; kwargs...)
-    mse(mr::ModelResult) = LsqFit.mse(mr.lfr)
     isconverged(mr::ModelResult) = isconverged(mr.lfr)
 
+    # use the Kish effective sample size
+    StatsAPI.nobs(mr::ModelResult) = sum(mr.wt)^2 / sum(mr.wt.^2)
+    StatsAPI.dof(mr::ModelResult) = nobs(mr) - length(coef(mr))
+    mse(mr::ModelResult) = rss(mr) / nobs(mr) # TODO: This is not quite right!  Think of this as a weighted average
+    chi2(mr::ModelResult) = rss(mr) / dof(mr) # TODO: Need to verify this.  Perhaps RSS is what should be fixed.
+    χ2(mr::ModelResult) = chi2(mr::ModelResult)
+
+    # StatsAPI.rss(lfr::LsqFitResult) = sum(abs2, lfr.resid) # lfr.resid includes weights AND uncertainties.
+    # StatsAPI.residuals(lfr::LsqFitResult) = lfr.resid  # lfr.resid includes weights AND uncertainties.
+
+    """
+        eval_uncertainty(mr::ModelResult; kwargs...)
+    
+    Compute the the uncertainty for the fitted model (i.e. confidence bands)
+
+    the independent variable are passed as keywords as usual for this package
+
+    * dscale : derivative step as a fraction of the uncertainty for each parameter
+
+    """
+    eval_uncertainty(mr::ModelResult; kwargs...) = eval_uncertainty(mr, 1.0; kwargs...)
+    function eval_uncertainty(mr::ModelResult, n_σ; dscale=0.01, kwargs...)
+        
+        p = coef(mr) # vector of exposed parameters
+        covar = vcov(mr) # covariance matrix of these parameters
+        dp = stderror(mr) .* dscale # derivative step size
+        f = mr.fm(p; kwargs...) # function value
+
+        df = [copy(f) for i in eachindex(p)]
+
+        # numerically compute derivatives
+        for i in eachindex(p)
+            p[i] += dp[i]
+            df[i] .-= mr.fm(p; kwargs...)
+            df[i] ./= dp[i]
+            p[i] -= dp[i]
+        end
+
+        # Compute the uncertainty
+        err = zero(f)
+        for i in eachindex(p), j in eachindex(p)
+            scale = covar[i, j] # need to scale by school function using σ, the number of sigmas
+            err += (df[i] .* df[j]) .* scale
+        end
+
+        # Currently returns something using the function I need to differentiate with respect to the parameters
+        return sqrt.(err)
+    end
 
     """
         fit(m::Model, ydata, ps::Parameters; kwargs...)
@@ -190,12 +259,12 @@ module LMfit
     # Alias for old version where weight was an optional argument.
     fit(m::Model, ydata::AbstractArray, wt::AbstractArray, ps::Parameters; key_args...) = fit(m, ydata, ps; wt=wt, key_args...)
     
-    function fit(m::Model, ydata::AbstractArray, ps::Parameters; kwargs=Dict(), covar_inv=nothing, wt=nothing, scale_covar=false, key_args...)
+    function fit(m::Model, ydata::AbstractArray, ps_init::Parameters; kwargs=Dict(), covar_inv=nothing, wt=nothing, scale_covar=false, key_args...)
 
         # Organize the independent variables
         (vars, not_vars) = _strip_vars_kwargs(m, key_args)
 
-        fm = _FitModel(m, ps; vars..., kwargs)
+        fm = FitModel(m, ps_init; vars..., kwargs)
 
         # Obtain vector of initial parameters and bounds
         p0 = vcat([p.value for (_, p) in fm.ps_fit if typeof(p) <: AbstractIndependentParameter]...)
@@ -231,7 +300,7 @@ module LMfit
             error("scale_covar not implemented yet")
         end
 
-        ModelResult(ps, fm, covar_inv, wt, size(ydata), result)
+        ModelResult(fm, ps_init, covar_inv, wt, size(ydata), result)
     end
 
 end # end of module
