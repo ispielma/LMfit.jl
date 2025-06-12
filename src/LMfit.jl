@@ -209,6 +209,8 @@ module LMfit
 
     the independent variable are passed as keywords as usual for this package
 
+    * n_σ : number of sigma's for the uncertainty band (currently ignored).
+
     * dscale : derivative step as a fraction of the uncertainty for each parameter
 
     """
@@ -238,7 +240,7 @@ module LMfit
         end
 
         # Currently returns something using the function I need to differentiate with respect to the parameters
-        return sqrt.(err)
+        return sqrt.(err) # for n_σ this multiplies the so-called school function.
     end
 
     """
