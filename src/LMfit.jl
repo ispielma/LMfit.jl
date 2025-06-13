@@ -5,6 +5,9 @@ In writing this I copied much about the python version, but using Symbols to lab
 """
 module LMfit
 
+    import Distributions: TDist, quantile
+    import SpecialFunctions: erf
+
     using OrderedCollections
     using FillArrays
 
@@ -209,7 +212,7 @@ module LMfit
 
     the independent variable are passed as keywords as usual for this package
 
-    * n_σ : number of sigma's for the uncertainty band (currently ignored).
+    * n_σ : number of sigma's for the uncertainty band.
 
     * dscale : derivative step as a fraction of the uncertainty for each parameter
 
@@ -235,12 +238,17 @@ module LMfit
         # Compute the uncertainty
         err = zero(f)
         for i in eachindex(p), j in eachindex(p)
-            scale = covar[i, j] # need to scale by school function using σ, the number of sigmas
+            scale = covar[i, j] 
             err += (df[i] .* df[j]) .* scale
         end
 
-        # Currently returns something using the function I need to differentiate with respect to the parameters
-        return sqrt.(err) # for n_σ this multiplies the so-called school function.
+        # Get scale factor for error band based on number of sigma desired.
+        # for n_σ = this converges to 1 for large dof(); I am not sure why this is not
+        # uniquely equal to 1.
+        p = erf(n_σ / sqrt(2))
+        scale =  quantile(TDist(dof(mr)), (1 + p) / 2) 
+
+        return sqrt.(err) .* scale # for n_σ this multiplies the so-called Students distribution function.
     end
 
     """
