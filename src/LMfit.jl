@@ -301,14 +301,17 @@ module LMfit
             result = curve_fit(fm, [], y_flat, covar_inv_flat .* wt_flat, p0; lower=lb, upper=ub, not_vars...)
         end
 
+        # scale_covar logic
+        if scale_covar
+            result.
+            error("scale_covar not implemented yet")
+        end
+
         params = @invokelatest fm._vect_to_params(result.param)
         
         _update_params_from_vect!(fm.ps_fit, :value, params)
 
-        # TODO: implement scale_covar logic
-        if scale_covar
-            error("scale_covar not implemented yet")
-        end
+
 
         ModelResult(fm, ps_init, covar_inv, wt, size(ydata), result)
     end
