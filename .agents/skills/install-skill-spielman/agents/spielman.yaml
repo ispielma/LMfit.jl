@@ -1,0 +1,6 @@
+schema: 1
+source_repo: /Users/ispielma/Code/Agent_Automation/AgentSkillsSpielman
+exclude:
+  - .DS_Store
+  - __pycache__/**
+  - "*.pyc"

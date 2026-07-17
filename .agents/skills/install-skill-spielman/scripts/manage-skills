@@ -1,0 +1,1523 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+usage:
+  manage-skills [--repo PATH] list
+  manage-skills list-sets
+  manage-skills validate
+  manage-skills install [--project PATH] [--overwrite] [--link] SKILL [SKILL...]
+  manage-skills install-set [--project PATH] [--overwrite] [--link] SKILLSET [SKILLSET...]
+  manage-skills refresh [--project PATH] [SKILL...]
+  manage-skills inspect SKILL_OR_PATH
+  manage-skills grab [--category support|engineering|productivity|experimental|writing | --dest-dir skills/PATH] [--replace] [--copy-spielman-yaml] SKILL_OR_PATH...
+  manage-skills update [--replace] [--copy-spielman-yaml] SKILL_OR_PATH
+
+Skills may be named by basename, such as "tdd", or by repo-relative path,
+such as "skills/engineering/tdd".
+
+Skillsets may be named by basename, such as "default", or by repo-relative
+path, such as "skillsets/default.yaml".
+EOF
+}
+
+resolve_self() {
+  local source="$1"
+  local dir target
+  while [ -L "$source" ]; do
+    dir="$(cd -P "$(dirname "$source")" >/dev/null 2>&1 && pwd)"
+    target="$(readlink "$source")"
+    if [[ "$target" == /* ]]; then
+      source="$target"
+    else
+      source="$dir/$target"
+    fi
+  done
+  cd -P "$(dirname "$source")" >/dev/null 2>&1 && pwd
+}
+
+find_repo_root() {
+  local dir="$1"
+  while [ "$dir" != "/" ]; do
+    if [ -d "$dir/skills" ] && [ -d "$dir/skillsets" ]; then
+      printf '%s\n' "$dir"
+      return 0
+    fi
+    dir="$(dirname "$dir")"
+  done
+  printf 'error: could not locate AgentSkillsSpielman repository root\n' >&2
+  return 1
+}
+
+SCRIPT_DIR="$(resolve_self "${BASH_SOURCE[0]}")"
+SCRIPT_SKILL_DIR="$(dirname "$SCRIPT_DIR")"
+
+CLI_REPO_ROOT=""
+case "${1:-}" in
+  --repo)
+    if [ "$#" -lt 2 ]; then
+      printf 'error: --repo requires a path\n' >&2
+      exit 2
+    fi
+    CLI_REPO_ROOT="$2"
+    shift 2
+    ;;
+  --repo=*)
+    CLI_REPO_ROOT="${1#--repo=}"
+    shift
+    ;;
+esac
+
+yaml_scalar() {
+  local file="$1"
+  local key="$2"
+  [ -f "$file" ] || return 1
+  awk -v key="$key" '
+    /^[^[:space:]#][^:]*:/ {
+      prefix = key ":"
+      if (index($0, prefix) == 1) {
+        sub("^[^:]+:[[:space:]]*", "", $0)
+        sub(/[[:space:]]+#.*/, "", $0)
+        gsub(/^["'\''"]|["'\''"]$/, "", $0)
+        print
+        exit
+      }
+    }
+  ' "$file"
+}
+
+yaml_list() {
+  local file="$1"
+  local key="$2"
+  [ -f "$file" ] || return 0
+  awk -v key="$key" '
+    /^[^[:space:]#][^:]*:/ {
+      current = $0
+      sub(/:.*/, "", current)
+      in_list = (current == key)
+      next
+    }
+    in_list && /^[[:space:]]*-[[:space:]]*/ {
+      line = $0
+      sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+      sub(/[[:space:]]+#.*/, "", line)
+      gsub(/^["'\''"]|["'\''"]$/, "", line)
+      if (line != "") print line
+      next
+    }
+    in_list && NF && $0 !~ /^[[:space:]#]/ { exit }
+  ' "$file"
+}
+
+yaml_nested_list() {
+  local file="$1"
+  local parent="$2"
+  local key="$3"
+  [ -f "$file" ] || return 0
+  awk -v parent="$parent" -v key="$key" '
+    /^[^[:space:]#][^:]*:/ {
+      current = $0
+      sub(/:.*/, "", current)
+      in_parent = (current == parent)
+      in_list = 0
+      next
+    }
+    in_parent && /^[[:space:]][[:space:]][^[:space:]#][^:]*:/ {
+      current = $0
+      sub(/^[[:space:]]+/, "", current)
+      sub(/:.*/, "", current)
+      in_list = (current == key)
+      next
+    }
+    in_parent && in_list && /^[[:space:]]{4,}-[[:space:]]*/ {
+      line = $0
+      sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+      sub(/[[:space:]]+#.*/, "", line)
+      gsub(/^["'\''"]|["'\''"]$/, "", line)
+      if (line != "") print line
+      next
+    }
+    in_parent && NF && $0 !~ /^[[:space:]#]/ { exit }
+    in_parent && in_list && NF && $0 !~ /^[[:space:]]{4,}/ && $0 !~ /^[[:space:]]*#/ { in_list = 0 }
+  ' "$file"
+}
+
+skill_config() {
+  printf '%s/agents/spielman.yaml\n' "$1"
+}
+
+add_exclude_filter() {
+  local pattern="$1"
+  filters+=(--exclude "$pattern")
+  if [[ "$pattern" == */** ]]; then
+    filters+=(--exclude "${pattern%/**}/")
+  fi
+}
+
+source_repo_from_skill_config() {
+  local config
+  config="$(skill_config "$SCRIPT_SKILL_DIR")"
+  yaml_scalar "$config" source_repo
+}
+
+REPO_ROOT="${CLI_REPO_ROOT:-${AGENT_SKILLS_SPIELMAN_REPO:-}}"
+if [ -z "$REPO_ROOT" ]; then
+  REPO_ROOT="$(find_repo_root "$SCRIPT_DIR" 2>/dev/null || true)"
+fi
+if [ -z "$REPO_ROOT" ]; then
+  REPO_ROOT="$(source_repo_from_skill_config || true)"
+fi
+if [ -z "$REPO_ROOT" ]; then
+  printf 'error: could not locate AgentSkillsSpielman repository root\n' >&2
+  printf 'set AGENT_SKILLS_SPIELMAN_REPO or source_repo in agents/spielman.yaml\n' >&2
+  exit 1
+fi
+REPO_ROOT="$(cd "$REPO_ROOT" >/dev/null 2>&1 && pwd)"
+SKILLS_DIR="$REPO_ROOT/skills"
+SKILLSETS_DIR="$REPO_ROOT/skillsets"
+PROTOCOLS_DIR="$REPO_ROOT/protocols"
+GLOBAL_SKILLS_DIR="${AGENT_SKILLS_DIR:-$HOME/.agents/skills}"
+DEFAULT_PROTOCOL_NAMESPACE="writing"
+
+frontmatter_value() {
+  local file="$1"
+  local key="$2"
+  awk -v key="$key" '
+    $0 == "---" { count++; next }
+    count == 1 && $0 !~ /^[[:space:]]/ {
+      prefix = key ":"
+      if (index($0, prefix) == 1) {
+        sub("^[^:]+:[[:space:]]*", "", $0)
+        gsub(/^["'\''"]|["'\''"]$/, "", $0)
+        print
+        exit
+      }
+    }
+    count == 2 { exit }
+  ' "$file"
+}
+
+metadata_value() {
+  local file="$1"
+  local key="$2"
+  awk -v key="$key" '
+    $0 == "---" { count++; next }
+    count == 1 && /^[^[:space:]]/ { in_metadata = 0 }
+    count == 1 && /^metadata:[[:space:]]*$/ { in_metadata = 1; next }
+    count == 1 && in_metadata && /^[[:space:]]+/ {
+      line = $0
+      sub(/^[[:space:]]+/, "", line)
+      prefix = key ":"
+      if (index(line, prefix) == 1) {
+        sub("^[^:]+:[[:space:]]*", "", line)
+        gsub(/^["'\''"]|["'\''"]$/, "", line)
+        print line
+        exit
+      }
+    }
+    count == 2 { exit }
+  ' "$file"
+}
+
+yaml_top_value() {
+  local file="$1"
+  local key="$2"
+  awk -v key="$key" '
+    $0 !~ /^[[:space:]]/ {
+      prefix = key ":"
+      if (index($0, prefix) == 1) {
+        sub("^[^:]+:[[:space:]]*", "", $0)
+        gsub(/^["'\''"]|["'\''"]$/, "", $0)
+        print
+        exit
+      }
+    }
+  ' "$file"
+}
+
+abs_path() {
+  local path="$1"
+  if [ -d "$path" ]; then
+    cd "$path" >/dev/null 2>&1 && pwd
+  else
+    local dir base
+    dir="$(dirname "$path")"
+    base="$(basename "$path")"
+    printf '%s/%s\n' "$(cd "$dir" >/dev/null 2>&1 && pwd)" "$base"
+  fi
+}
+
+skill_name() {
+  local dir="$1"
+  local name
+  name="$(frontmatter_value "$dir/SKILL.md" name)"
+  printf '%s\n' "${name:-$(basename "$dir")}"
+}
+
+skill_description() {
+  frontmatter_value "$1/SKILL.md" description
+}
+
+skill_uuid() {
+  metadata_value "$1/SKILL.md" uuid
+}
+
+uuid_exists() {
+  local request_uuid="$1"
+  local skill_md
+  while IFS= read -r skill_md; do
+    if [ "$(metadata_value "$skill_md" uuid)" = "$request_uuid" ]; then
+      return 0
+    fi
+  done < <(find "$SKILLS_DIR" -name SKILL.md -type f -print)
+  return 1
+}
+
+generate_uuid() {
+  if command -v uuidgen >/dev/null 2>&1; then
+    uuidgen | tr '[:upper:]' '[:lower:]'
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import uuid; print(uuid.uuid4())'
+  else
+    printf 'error: uuidgen or python3 is required to assign missing metadata.uuid\n' >&2
+    return 1
+  fi
+}
+
+generate_unique_uuid() {
+  local uuid
+  while :; do
+    uuid="$(generate_uuid)"
+    if ! uuid_exists "$uuid"; then
+      printf '%s\n' "$uuid"
+      return 0
+    fi
+  done
+}
+
+ensure_skill_uuid() {
+  local skill_dir="$1"
+  local file uuid tmp
+  file="$skill_dir/SKILL.md"
+  if [ -n "$(skill_uuid "$skill_dir")" ]; then
+    return 0
+  fi
+  uuid="$(generate_unique_uuid)"
+  tmp="$(mktemp)"
+  awk -v uuid="$uuid" '
+    NR == 1 && $0 == "---" {
+      in_fm = 1
+      print
+      next
+    }
+    in_fm && $0 == "---" {
+      if (!inserted) {
+        if (!saw_metadata) print "metadata:"
+        print "  uuid: \"" uuid "\""
+        inserted = 1
+      }
+      print
+      in_fm = 0
+      next
+    }
+    in_fm && /^metadata:[[:space:]]*$/ {
+      saw_metadata = 1
+      in_metadata = 1
+      print
+      next
+    }
+    in_fm && in_metadata && /^[^[:space:]]/ {
+      if (!inserted) {
+        print "  uuid: \"" uuid "\""
+        inserted = 1
+      }
+      in_metadata = 0
+    }
+    { print }
+  ' "$file" >"$tmp"
+  mv "$tmp" "$file"
+  printf 'assigned metadata.uuid %s to %s\n' "$uuid" "${skill_dir#"$REPO_ROOT"/}"
+}
+
+copy_tree() {
+  local source="$1"
+  local dest="$2"
+  local config pattern filters=()
+  mkdir -p "$(dirname "$dest")"
+  rm -rf "$dest"
+  mkdir -p "$dest"
+  config="$(skill_config "$source")"
+  while IFS= read -r pattern; do
+    add_exclude_filter "$pattern"
+  done < <(yaml_list "$config" exclude)
+
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a \
+      "${filters[@]}" \
+      "$source/" "$dest/"
+  else
+    cp -pR "$source/." "$dest"
+    find "$dest" \( -name '.DS_Store' -o -name '*.pyc' \) -delete
+    find "$dest" -type d -name '__pycache__' -prune -exec rm -rf {} +
+  fi
+}
+
+replace_tree_safely() {
+  local source="$1"
+  local dest="$2"
+  local preserve_spielman_config="${3:-0}"
+  local source_config dest_config pattern filters=() preserve_file
+  mkdir -p "$dest"
+  source_config="$(skill_config "$source")"
+  dest_config="$(skill_config "$dest")"
+  preserve_file="$(mktemp)"
+  yaml_list "$dest_config" preserve >"$preserve_file"
+
+  while IFS= read -r pattern; do
+    add_exclude_filter "$pattern"
+  done < <(yaml_list "$source_config" exclude)
+  while IFS= read -r pattern; do
+    add_exclude_filter "$pattern"
+  done < <(yaml_list "$dest_config" exclude)
+  while IFS= read -r pattern; do
+    add_exclude_filter "$pattern"
+  done < <(yaml_list "$source_config" preserve)
+  while IFS= read -r pattern; do
+    add_exclude_filter "$pattern"
+  done < <(yaml_list "$dest_config" preserve)
+  if [ "$preserve_spielman_config" -eq 1 ]; then
+    add_exclude_filter "agents/spielman.yaml"
+  fi
+
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a --delete "${filters[@]}" "$source/" "$dest/"
+    merge_yaml_list "$dest_config" preserve "$preserve_file"
+    if [ "$preserve_spielman_config" -eq 1 ]; then
+      ensure_spielman_config "$dest"
+    fi
+    rm -f "$preserve_file"
+  else
+    rm -f "$preserve_file"
+    printf 'error: refresh/update requires rsync so preserve patterns are honored\n' >&2
+    return 1
+  fi
+}
+
+merge_yaml_list() {
+  local file="$1"
+  local key="$2"
+  local values_file="$3"
+  local value
+  [ -s "$values_file" ] || return 0
+  [ -f "$file" ] || return 0
+
+  if ! grep -q "^$key:" "$file"; then
+    printf '%s:\n' "$key" >>"$file"
+  fi
+
+  while IFS= read -r value; do
+    if ! yaml_list "$file" "$key" | grep -Fxq "$value"; then
+      printf '  - %s\n' "$value" >>"$file"
+    fi
+  done <"$values_file"
+}
+
+append_yaml_nested_list_value() {
+  local file="$1"
+  local parent="$2"
+  local key="$3"
+  local value="$4"
+  [ -f "$file" ] || return 0
+  if yaml_nested_list "$file" "$parent" "$key" | grep -Fxq "$value"; then
+    return 0
+  fi
+  if ! grep -q "^$parent:" "$file"; then
+    {
+      printf '%s:\n' "$parent"
+      printf '  %s:\n' "$key"
+    } >>"$file"
+  elif ! awk -v parent="$parent" -v key="$key" '
+    /^[^[:space:]#][^:]*:/ {
+      current = $0
+      sub(/:.*/, "", current)
+      in_parent = (current == parent)
+      next
+    }
+    in_parent && /^[[:space:]][[:space:]][^[:space:]#][^:]*:/ {
+      current = $0
+      sub(/^[[:space:]]+/, "", current)
+      sub(/:.*/, "", current)
+      if (current == key) found = 1
+      next
+    }
+    in_parent && NF && $0 !~ /^[[:space:]#]/ { exit }
+    END { exit found ? 0 : 1 }
+  ' "$file"; then
+    printf '  %s:\n' "$key" >>"$file"
+  fi
+  printf '    - %s\n' "$value" >>"$file"
+}
+
+set_yaml_scalar() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+  local tmp
+  tmp="$(mktemp)"
+  awk -v key="$key" -v value="$value" '
+    BEGIN { done = 0 }
+    /^[^[:space:]#][^:]*:/ {
+      current = $0
+      sub(/:.*/, "", current)
+      if (current == key) {
+        print key ": " value
+        done = 1
+        next
+      }
+    }
+    { print }
+    END {
+      if (!done) print key ": " value
+    }
+  ' "$file" >"$tmp"
+  mv "$tmp" "$file"
+}
+
+stamp_source_repo_if_needed() {
+  local skill_dir="$1"
+  local config
+  config="$(skill_config "$skill_dir")"
+  if [ -f "$config" ] && grep -q '^[[:space:]]*source_repo:' "$config"; then
+    set_yaml_scalar "$config" source_repo "$REPO_ROOT"
+  fi
+}
+
+clear_source_repo_if_needed() {
+  local skill_dir="$1"
+  local config
+  config="$(skill_config "$skill_dir")"
+  if [ -f "$config" ] && grep -q '^[[:space:]]*source_repo:' "$config"; then
+    set_yaml_scalar "$config" source_repo ""
+  fi
+}
+
+create_default_spielman_config() {
+  local skill_dir="$1"
+  local config
+  config="$(skill_config "$skill_dir")"
+  mkdir -p "$(dirname "$config")"
+  cat >"$config" <<'EOF'
+schema: 1
+exclude:
+  - .DS_Store
+  - __pycache__/**
+  - "*.pyc"
+EOF
+}
+
+ensure_spielman_config() {
+  local skill_dir="$1"
+  local config
+  config="$(skill_config "$skill_dir")"
+  if [ ! -f "$config" ]; then
+    create_default_spielman_config "$skill_dir"
+  fi
+}
+
+validate_protocol_rel() {
+  local rel="$1"
+  if [ -z "$rel" ] || [[ "$rel" == /* ]] || [[ "$rel" == *..* ]] || [[ "$rel" != */* ]]; then
+    return 1
+  fi
+  return 0
+}
+
+skill_protocols() {
+  local skill_dir="$1"
+  yaml_nested_list "$(skill_config "$skill_dir")" requires protocols
+}
+
+copy_protocol_to_project() {
+  local rel="$1"
+  local project="$2"
+  local source dest
+  if ! validate_protocol_rel "$rel"; then
+    printf 'error: invalid protocol path in agents/spielman.yaml: %s\n' "$rel" >&2
+    return 1
+  fi
+  source="$PROTOCOLS_DIR/$rel"
+  dest="$project/.agents/protocols/$rel"
+  if [ ! -f "$source" ]; then
+    printf 'error: missing protocol dependency: protocols/%s\n' "$rel" >&2
+    return 1
+  fi
+  mkdir -p "$(dirname "$dest")"
+  cp -p "$source" "$dest"
+  printf 'installed protocol protocols/%s -> %s\n' "$rel" "$dest"
+}
+
+install_skill_protocols() {
+  local source="$1"
+  local project="$2"
+  local rel
+  while IFS= read -r rel; do
+    copy_protocol_to_project "$rel" "$project"
+  done < <(skill_protocols "$source")
+}
+
+list_skills() {
+  find "$SKILLS_DIR" -name SKILL.md -type f | sort | while IFS= read -r skill_md; do
+    local dir rel name description uuid
+    dir="$(dirname "$skill_md")"
+    rel="${dir#"$REPO_ROOT"/}"
+    name="$(frontmatter_value "$skill_md" name)"
+    description="$(frontmatter_value "$skill_md" description)"
+    uuid="$(metadata_value "$skill_md" uuid)"
+    printf '%s\n' "$rel"
+    printf '  name: %s\n' "${name:-$(basename "$dir")}"
+    if [ -n "$uuid" ]; then
+      printf '  uuid: %s\n' "$uuid"
+    fi
+    if [ -n "$description" ]; then
+      printf '  description: %s\n' "$description"
+    fi
+  done
+}
+
+list_skillsets() {
+  find "$SKILLSETS_DIR" -maxdepth 1 -name '*.yaml' -type f | sort | while IFS= read -r skillset; do
+    local name description
+    name="$(yaml_top_value "$skillset" name)"
+    description="$(yaml_top_value "$skillset" description)"
+    printf '%s\n' "${name:-$(basename "$skillset" .yaml)}"
+    printf '  path: %s\n' "${skillset#"$REPO_ROOT"/}"
+    if [ -n "$description" ]; then
+      printf '  description: %s\n' "$description"
+    fi
+  done
+}
+
+resolve_skill() {
+  local request="$1"
+  local candidate
+
+  if [[ "$request" == /* ]]; then
+    candidate="$request"
+  else
+    candidate="$REPO_ROOT/$request"
+  fi
+
+  if [ -d "$candidate" ] && [ -f "$candidate/SKILL.md" ]; then
+    abs_path "$candidate"
+    return 0
+  fi
+
+  local matches=()
+  while IFS= read -r skill_md; do
+    local dir
+    dir="$(dirname "$skill_md")"
+    if [ "$(basename "$dir")" = "$request" ]; then
+      matches+=("$dir")
+    fi
+  done < <(find "$SKILLS_DIR" -name SKILL.md -type f | sort)
+
+  if [ "${#matches[@]}" -eq 1 ]; then
+    abs_path "${matches[0]}"
+    return 0
+  fi
+
+  if [ "${#matches[@]}" -gt 1 ]; then
+    printf 'error: ambiguous skill %s\n' "$request" >&2
+    printf 'matches:\n' >&2
+    printf '  %s\n' "${matches[@]#"$REPO_ROOT"/}" >&2
+    return 1
+  fi
+
+  printf 'error: skill not found: %s\n' "$request" >&2
+  return 1
+}
+
+resolve_skill_by_uuid() {
+  local request_uuid="$1"
+  local matches=()
+  while IFS= read -r skill_md; do
+    local dir uuid
+    dir="$(dirname "$skill_md")"
+    uuid="$(metadata_value "$skill_md" uuid)"
+    if [ "$uuid" = "$request_uuid" ]; then
+      matches+=("$dir")
+    fi
+  done < <(find "$SKILLS_DIR" -name SKILL.md -type f | sort)
+
+  if [ "${#matches[@]}" -eq 1 ]; then
+    abs_path "${matches[0]}"
+    return 0
+  fi
+  if [ "${#matches[@]}" -gt 1 ]; then
+    printf 'error: duplicate source skills for uuid %s\n' "$request_uuid" >&2
+    printf '  %s\n' "${matches[@]#"$REPO_ROOT"/}" >&2
+    return 1
+  fi
+  return 1
+}
+
+resolve_skillset() {
+  local request="$1"
+  local candidate
+
+  if [[ "$request" == /* ]]; then
+    candidate="$request"
+  else
+    candidate="$REPO_ROOT/$request"
+  fi
+
+  if [ -f "$candidate" ]; then
+    abs_path "$candidate"
+    return 0
+  fi
+
+  candidate="$SKILLSETS_DIR/$request"
+  if [ -f "$candidate" ]; then
+    abs_path "$candidate"
+    return 0
+  fi
+
+  candidate="$SKILLSETS_DIR/$request.yaml"
+  if [ -f "$candidate" ]; then
+    abs_path "$candidate"
+    return 0
+  fi
+
+  printf 'error: skillset not found: %s\n' "$request" >&2
+  return 1
+}
+
+skill_paths_from_skillset() {
+  local skillset="$1"
+  awk '
+    /^[[:space:]]*skills:[[:space:]]*$/ { in_skills = 1; next }
+    in_skills && /^[^[:space:]-]/ { exit }
+    in_skills && /^[[:space:]]*-[[:space:]]*/ {
+      sub(/^[[:space:]]*-[[:space:]]*/, "", $0)
+      sub(/[[:space:]]*#.*/, "", $0)
+      gsub(/^["'\''"]|["'\''"]$/, "", $0)
+      if ($0 != "") print
+    }
+  ' "$skillset"
+}
+
+parse_project_and_items() {
+  PROJECT="$(pwd)"
+  OVERWRITE=0
+  LINK_MODE=0
+  ITEMS=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --project)
+        if [ "$#" -lt 2 ]; then
+          printf 'error: --project requires a path\n' >&2
+          exit 2
+        fi
+        PROJECT="$2"
+        shift 2
+        ;;
+      --project=*)
+        PROJECT="${1#--project=}"
+        shift
+        ;;
+      --overwrite)
+        OVERWRITE=1
+        shift
+        ;;
+      --link)
+        LINK_MODE=1
+        shift
+        ;;
+      -*)
+        printf 'error: unknown option: %s\n' "$1" >&2
+        exit 2
+        ;;
+      *)
+        ITEMS+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  PROJECT="$(abs_path "$PROJECT")"
+  if [ "${#ITEMS[@]}" -eq 0 ]; then
+    printf 'error: no items specified\n' >&2
+    exit 2
+  fi
+}
+
+parse_refresh_args() {
+  PROJECT="$(pwd)"
+  ITEMS=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --project)
+        if [ "$#" -lt 2 ]; then
+          printf 'error: --project requires a path\n' >&2
+          exit 2
+        fi
+        PROJECT="$2"
+        shift 2
+        ;;
+      --project=*)
+        PROJECT="${1#--project=}"
+        shift
+        ;;
+      -*)
+        printf 'error: unknown option: %s\n' "$1" >&2
+        exit 2
+        ;;
+      *)
+        ITEMS+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  PROJECT="$(abs_path "$PROJECT")"
+}
+
+install_skill_dir() {
+  local source="$1"
+  local project="$2"
+  local overwrite="$3"
+  local link_mode="$4"
+  local dest_root dest name
+
+  name="$(skill_name "$source")"
+  dest_root="$project/.agents/skills"
+  dest="$dest_root/$name"
+  mkdir -p "$dest_root"
+
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    if [ "$overwrite" -ne 1 ]; then
+      printf 'exists: %s\n' "$dest" >&2
+      printf '  use --overwrite to replace it, or refresh to update by matching uuid\n' >&2
+      return 1
+    fi
+    rm -rf "$dest"
+  fi
+
+  if [ "$link_mode" -eq 1 ]; then
+    ln -s "$source" "$dest"
+    printf 'linked %s -> %s\n' "$dest" "$source"
+  else
+    copy_tree "$source" "$dest"
+    stamp_source_repo_if_needed "$dest"
+    printf 'installed %s -> %s\n' "${source#"$REPO_ROOT"/}" "$dest"
+  fi
+  install_skill_protocols "$source" "$project"
+}
+
+install_skills() {
+  parse_project_and_items "$@"
+  local item source
+  for item in "${ITEMS[@]}"; do
+    source="$(resolve_skill "$item")"
+    install_skill_dir "$source" "$PROJECT" "$OVERWRITE" "$LINK_MODE"
+  done
+}
+
+install_skillsets() {
+  parse_project_and_items "$@"
+  local item skillset rel source
+  for item in "${ITEMS[@]}"; do
+    skillset="$(resolve_skillset "$item")"
+    printf 'installing skillset %s\n' "${skillset#"$REPO_ROOT"/}"
+    while IFS= read -r rel; do
+      source="$(resolve_skill "$rel")"
+      install_skill_dir "$source" "$PROJECT" "$OVERWRITE" "$LINK_MODE"
+    done < <(skill_paths_from_skillset "$skillset")
+  done
+}
+
+refresh_one_dest() {
+  local dest="$1"
+  local source="${2:-}"
+  local dest_uuid source_uuid
+
+  if [ ! -d "$dest" ] || [ ! -f "$dest/SKILL.md" ]; then
+    printf 'error: not an installed skill directory: %s\n' "$dest" >&2
+    return 1
+  fi
+  if [ -L "$dest" ]; then
+    printf 'skip symlink: %s\n' "$dest"
+    return 0
+  fi
+
+  dest_uuid="$(skill_uuid "$dest")"
+  if [ -z "$dest_uuid" ]; then
+    printf 'error: installed skill lacks metadata.uuid: %s\n' "$dest" >&2
+    return 1
+  fi
+
+  if [ -z "$source" ]; then
+    if ! source="$(resolve_skill_by_uuid "$dest_uuid")"; then
+      printf 'error: no source skill found with uuid %s for %s\n' "$dest_uuid" "$dest" >&2
+      return 1
+    fi
+  fi
+
+  source_uuid="$(skill_uuid "$source")"
+  if [ "$source_uuid" != "$dest_uuid" ]; then
+    printf 'error: uuid mismatch for %s\n' "$dest" >&2
+    printf '  source: %s %s\n' "$source_uuid" "$source" >&2
+    printf '  dest:   %s %s\n' "$dest_uuid" "$dest" >&2
+    return 1
+  fi
+
+  replace_tree_safely "$source" "$dest"
+  stamp_source_repo_if_needed "$dest"
+  install_skill_protocols "$source" "$PROJECT"
+  printf 'refreshed %s from %s\n' "$dest" "${source#"$REPO_ROOT"/}"
+}
+
+refresh_skills() {
+  parse_refresh_args "$@"
+  local dest_root="$PROJECT/.agents/skills"
+  local item source name dest
+  if [ ! -d "$dest_root" ]; then
+    printf 'error: no .agents/skills directory: %s\n' "$dest_root" >&2
+    return 1
+  fi
+
+  if [ "${#ITEMS[@]}" -eq 0 ]; then
+    while IFS= read -r dest; do
+      refresh_one_dest "$dest"
+    done < <(find "$dest_root" -maxdepth 1 -mindepth 1 -type d -print | sort)
+    return 0
+  fi
+
+  for item in "${ITEMS[@]}"; do
+    source="$(resolve_skill "$item")"
+    name="$(skill_name "$source")"
+    dest="$dest_root/$name"
+    refresh_one_dest "$dest" "$source"
+  done
+}
+
+resolve_external_source() {
+  local request="$1"
+  local candidate
+  if [[ "$request" == */* ]]; then
+    candidate="$request"
+  else
+    candidate="$GLOBAL_SKILLS_DIR/$request"
+  fi
+
+  if [ ! -e "$candidate" ] && [ ! -L "$candidate" ]; then
+    printf 'error: skill source not found: %s\n' "$request" >&2
+    return 1
+  fi
+  if [ -L "$candidate" ]; then
+    printf 'error: refusing to copy symlinked skill: %s -> %s\n' "$candidate" "$(readlink "$candidate")" >&2
+    return 1
+  fi
+  if [ ! -d "$candidate" ] || [ ! -f "$candidate/SKILL.md" ]; then
+    printf 'error: source is not a skill directory with SKILL.md: %s\n' "$candidate" >&2
+    return 1
+  fi
+  abs_path "$candidate"
+}
+
+external_agents_dir() {
+  local source="$1"
+  local dir parent
+  dir="$source"
+  while [ "$dir" != "/" ]; do
+    parent="$(dirname "$dir")"
+    if [ "$(basename "$parent")" = "skills" ] && [ "$(basename "$(dirname "$parent")")" = ".agents" ]; then
+      printf '%s\n' "$(dirname "$parent")"
+      return 0
+    fi
+    dir="$parent"
+  done
+  return 1
+}
+
+detected_protocol_refs() {
+  local source="$1"
+  grep -Eo '\.agents/protocols/[A-Za-z0-9._/-]+' "$source/SKILL.md" 2>/dev/null |
+    sed 's#^\.agents/protocols/##' |
+    sort -u
+}
+
+protocol_destination_rel() {
+  local ref="$1"
+  if [[ "$ref" == */* ]]; then
+    printf '%s\n' "$ref"
+  else
+    printf '%s/%s\n' "$DEFAULT_PROTOCOL_NAMESPACE" "$ref"
+  fi
+}
+
+copy_detected_protocols() {
+  local source="$1"
+  local dest="$2"
+  local agents_dir ref rel source_file dest_file
+  agents_dir="$(external_agents_dir "$source" || true)"
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    rel="$(protocol_destination_rel "$ref")"
+    if ! validate_protocol_rel "$rel"; then
+      printf 'error: invalid detected protocol path: %s\n' "$ref" >&2
+      return 1
+    fi
+    if [ -z "$agents_dir" ]; then
+      printf 'error: cannot locate .agents directory for protocol reference: %s\n' "$ref" >&2
+      return 1
+    fi
+    source_file="$agents_dir/protocols/$ref"
+    if [ ! -f "$source_file" ]; then
+      printf 'error: referenced protocol file not found: %s\n' "$source_file" >&2
+      return 1
+    fi
+    dest_file="$PROTOCOLS_DIR/$rel"
+    mkdir -p "$(dirname "$dest_file")"
+    cp -p "$source_file" "$dest_file"
+    append_yaml_nested_list_value "$(skill_config "$dest")" requires protocols "$rel"
+    printf 'grabbed protocol %s -> protocols/%s\n' "$source_file" "$rel"
+  done < <(detected_protocol_refs "$source")
+}
+
+replace_literal_in_file() {
+  local file="$1"
+  local old="$2"
+  local new="$3"
+  local tmp
+  tmp="$(mktemp)"
+  awk -v old="$old" -v new="$new" '
+    {
+      while ((pos = index($0, old)) > 0) {
+        $0 = substr($0, 1, pos - 1) new substr($0, pos + length(old))
+      }
+      print
+    }
+  ' "$file" >"$tmp"
+  mv "$tmp" "$file"
+}
+
+rewrite_protocol_refs() {
+  local source="$1"
+  local skill_dir="$2"
+  local file="$skill_dir/SKILL.md"
+  local ref rel
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    rel="$(protocol_destination_rel "$ref")"
+    if [ "$rel" != "$ref" ]; then
+      replace_literal_in_file "$file" ".agents/protocols/$ref" ".agents/protocols/$rel"
+    fi
+  done < <(detected_protocol_refs "$source")
+}
+
+suggest_category() {
+  local name="$1"
+  local description="$2"
+  local text
+  text="$(printf '%s %s\n' "$name" "$description" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$text" == *codex* ]] ||
+    [[ "$text" == *skillset* ]] ||
+    [[ "$text" == *"agent skill"* ]] ||
+    [[ "$text" == *"skills repository"* ]] ||
+    [[ "$text" == *install*skill* ]] ||
+    [[ "$text" == *import*skill* ]] ||
+    [[ "$text" == *copy*skill* ]] ||
+    [[ "$text" == *find*skill* ]] ||
+    [[ "$text" == *discover*skill* ]] ||
+    [[ "$text" == *create*skill* ]] ||
+    [[ "$text" == *scaffold*skill* ]]; then
+    printf 'support\n'
+  elif [[ "$text" =~ manuscript|latex|bibliograph|citation|journal|reviewer|referee|coauthor|editor|paper|writing ]]; then
+    printf 'writing\n'
+  elif [[ "$text" =~ prd|issue|plan|planning|write|interview|document|status ]]; then
+    printf 'productivity\n'
+  elif [[ "$text" =~ experimental|experiment|prototype|provisional|spike ]]; then
+    printf 'experimental\n'
+  else
+    printf 'engineering\n'
+  fi
+}
+
+category_dir() {
+  case "$1" in
+    root|support)
+      printf '%s/skills/support\n' "$REPO_ROOT"
+      ;;
+    engineering|productivity|experimental|writing)
+      printf '%s/skills/%s\n' "$REPO_ROOT" "$1"
+      ;;
+    *)
+      printf 'error: unknown category: %s\n' "$1" >&2
+      return 1
+      ;;
+  esac
+}
+
+print_metadata() {
+  local label="$1"
+  local dir="$2"
+  printf '%s:\n' "$label"
+  printf '  path: %s\n' "$dir"
+  printf '  name: %s\n' "$(skill_name "$dir")"
+  printf '  uuid: %s\n' "$(skill_uuid "$dir")"
+  local description
+  description="$(skill_description "$dir")"
+  if [ -n "$description" ]; then
+    printf '  description: %s\n' "$description"
+  fi
+}
+
+resolve_grab_parent() {
+  local category="$1"
+  local dest_dir="$2"
+  if [ -n "$category" ]; then
+    category_dir "$category"
+    return
+  fi
+  case "$dest_dir" in
+    /*)
+      printf '%s\n' "$dest_dir"
+      ;;
+    skills|skills/*)
+      printf '%s/%s\n' "$REPO_ROOT" "$dest_dir"
+      ;;
+    *)
+      printf 'error: --dest-dir must be an absolute path or start with skills/\n' >&2
+      return 2
+      ;;
+  esac
+}
+
+inspect_skill() {
+  if [ "$#" -ne 1 ]; then
+    usage >&2
+    return 2
+  fi
+  local source name description suggested ref rel
+  source="$(resolve_external_source "$1")"
+  name="$(skill_name "$source")"
+  description="$(skill_description "$source")"
+  suggested="$(suggest_category "$name" "$description")"
+  print_metadata "source" "$source"
+  printf 'suggested_category: %s\n' "$suggested"
+  printf 'suggested_destination: %s/%s\n' "$(category_dir "$suggested")" "$name"
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    rel="$(protocol_destination_rel "$ref")"
+    printf 'detected_protocol: .agents/protocols/%s -> protocols/%s\n' "$ref" "$rel"
+  done < <(detected_protocol_refs "$source")
+}
+
+grab_one_skill() {
+  local source="$1"
+  local parent="$2"
+  local replace="$3"
+  local copy_spielman_yaml="$4"
+  local name dest
+  name="$(skill_name "$source")"
+  dest="$parent/$name"
+
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    if [ "$replace" -ne 1 ]; then
+      printf 'error: destination already exists: %s\n' "$dest" >&2
+      print_metadata "existing" "$dest" >&2
+      print_metadata "incoming" "$source" >&2
+      printf 'ask the user before replacing; rerun with --replace only after confirmation\n' >&2
+      return 1
+    fi
+  fi
+
+  if [ "$copy_spielman_yaml" -eq 1 ]; then
+    replace_tree_safely "$source" "$dest"
+    ensure_spielman_config "$dest"
+  else
+    replace_tree_safely "$source" "$dest" 1
+    clear_source_repo_if_needed "$dest"
+  fi
+  ensure_skill_uuid "$dest"
+  copy_detected_protocols "$source" "$dest"
+  rewrite_protocol_refs "$source" "$dest"
+  printf 'grabbed %s -> %s\n' "$source" "$dest"
+  GRAB_ONE_DEST="$dest"
+}
+
+inspect_grab_candidate() {
+  local source="$1"
+  local parent="$2"
+  local name ref rel
+  name="$(skill_name "$source")"
+  print_metadata "source" "$source"
+  printf 'proposed_destination: %s/%s\n' "$parent" "$name"
+  if [ -z "$(skill_uuid "$source")" ]; then
+    printf 'uuid_status: missing; grab will assign a new UUID\n'
+  else
+    printf 'uuid_status: present\n'
+  fi
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    rel="$(protocol_destination_rel "$ref")"
+    printf 'detected_protocol: .agents/protocols/%s -> protocols/%s\n' "$ref" "$rel"
+  done < <(detected_protocol_refs "$source")
+}
+
+grab_skill() {
+  local category=""
+  local dest_dir=""
+  local replace=0
+  local copy_spielman_yaml=0
+  local source_args=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --category)
+        if [ "$#" -lt 2 ]; then
+          printf 'error: --category requires a value\n' >&2
+          return 2
+        fi
+        category="$2"
+        shift 2
+        ;;
+      --category=*)
+        category="${1#--category=}"
+        shift
+        ;;
+      --dest-dir)
+        if [ "$#" -lt 2 ]; then
+          printf 'error: --dest-dir requires a value\n' >&2
+          return 2
+        fi
+        dest_dir="$2"
+        shift 2
+        ;;
+      --dest-dir=*)
+        dest_dir="${1#--dest-dir=}"
+        shift
+        ;;
+      --replace|--overwrite)
+        replace=1
+        shift
+        ;;
+      --copy-spielman-yaml)
+        copy_spielman_yaml=1
+        shift
+        ;;
+      -*)
+        printf 'error: unknown option: %s\n' "$1" >&2
+        return 2
+        ;;
+      *)
+        source_args+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  if [ "${#source_args[@]}" -eq 0 ]; then
+    printf 'error: no skill source specified\n' >&2
+    return 2
+  fi
+  if [ -n "$category" ] && [ -n "$dest_dir" ]; then
+    printf 'error: use --category or --dest-dir, not both\n' >&2
+    return 2
+  fi
+  if [ -z "$category" ] && [ -z "$dest_dir" ]; then
+    printf 'error: grab requires --category or --dest-dir after user confirmation\n' >&2
+    return 2
+  fi
+
+  local parent
+  parent="$(resolve_grab_parent "$category" "$dest_dir")"
+
+  local source_arg source name dest errors=0 touched=() resolved_sources=()
+  for source_arg in "${source_args[@]}"; do
+    source="$(resolve_external_source "$source_arg")"
+    resolved_sources+=("$source")
+    name="$(skill_name "$source")"
+    dest="$parent/$name"
+    if [ -e "$dest" ] || [ -L "$dest" ]; then
+      if [ "$replace" -ne 1 ]; then
+        printf 'error: destination already exists: %s\n' "$dest" >&2
+        print_metadata "existing" "$dest" >&2
+        print_metadata "incoming" "$source" >&2
+        errors=$((errors + 1))
+      fi
+    fi
+  done
+  if [ "$errors" -ne 0 ]; then
+    printf 'error: refusing grab with %s conflict(s)\n' "$errors" >&2
+    return 1
+  fi
+  for source in "${resolved_sources[@]}"; do
+    grab_one_skill "$source" "$parent" "$replace" "$copy_spielman_yaml"
+    touched+=("$GRAB_ONE_DEST")
+  done
+  if ! validate_skill_subset "${touched[@]}"; then
+    printf 'error: validation failed after grab\n' >&2
+    return 1
+  fi
+  printf 'grabbed %s skill(s)\n' "${#touched[@]}"
+}
+
+update_source_skill() {
+  local replace=0
+  local copy_spielman_yaml=0
+  local source_arg=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --replace|--overwrite)
+        replace=1
+        shift
+        ;;
+      --copy-spielman-yaml)
+        copy_spielman_yaml=1
+        shift
+        ;;
+      -*)
+        printf 'error: unknown option: %s\n' "$1" >&2
+        return 2
+        ;;
+      *)
+        if [ -n "$source_arg" ]; then
+          printf 'error: only one skill source may be updated at a time\n' >&2
+          return 2
+        fi
+        source_arg="$1"
+        shift
+        ;;
+    esac
+  done
+  if [ -z "$source_arg" ]; then
+    printf 'error: no skill source specified\n' >&2
+    return 2
+  fi
+
+  local source uuid dest incoming_name dest_name
+  source="$(resolve_external_source "$source_arg")"
+  uuid="$(skill_uuid "$source")"
+  if [ -z "$uuid" ]; then
+    printf 'error: source skill lacks metadata.uuid: %s\n' "$source" >&2
+    return 1
+  fi
+  if ! dest="$(resolve_skill_by_uuid "$uuid")"; then
+    printf 'error: no AgentSkillsSpielman skill has uuid %s\n' "$uuid" >&2
+    return 1
+  fi
+  if [ "$source" = "$dest" ]; then
+    printf 'already current: %s\n' "$dest"
+    return 0
+  fi
+  incoming_name="$(skill_name "$source")"
+  dest_name="$(basename "$dest")"
+  if [ "$incoming_name" != "$dest_name" ]; then
+    printf 'error: source skill name %s does not match destination folder %s\n' "$incoming_name" "$dest_name" >&2
+    printf '  rename handling is intentionally explicit; update the source-of-truth path first\n' >&2
+    return 1
+  fi
+  if [ "$replace" -ne 1 ]; then
+    print_metadata "existing" "$dest"
+    print_metadata "incoming" "$source"
+    printf 'refusing to replace without --replace\n' >&2
+    return 1
+  fi
+  if [ "$copy_spielman_yaml" -eq 1 ]; then
+    replace_tree_safely "$source" "$dest"
+    ensure_spielman_config "$dest"
+  else
+    replace_tree_safely "$source" "$dest" 1
+    clear_source_repo_if_needed "$dest"
+  fi
+  copy_detected_protocols "$source" "$dest"
+  rewrite_protocol_refs "$source" "$dest"
+  if ! validate_skill_subset "$dest"; then
+    printf 'error: validation failed after update\n' >&2
+    return 1
+  fi
+  printf 'updated %s from %s\n' "${dest#"$REPO_ROOT"/}" "$source"
+}
+
+validate_one_skill_dir() {
+  local dir="$1"
+  local seen_file="$2"
+  local name_re="$3"
+  local uuid_re="$4"
+  local errors=0
+  local rel name description uuid spielman_config schema protocol_rel
+
+  rel="${dir#"$REPO_ROOT"/}"
+  name="$(frontmatter_value "$dir/SKILL.md" name)"
+  description="$(frontmatter_value "$dir/SKILL.md" description)"
+  uuid="$(metadata_value "$dir/SKILL.md" uuid)"
+  spielman_config="$(skill_config "$dir")"
+
+  if [ -z "$name" ]; then
+    printf -- '- %s: missing frontmatter name\n' "$rel" >&2
+    errors=$((errors + 1))
+  elif [[ ! "$name" =~ $name_re ]]; then
+    printf -- '- %s: invalid skill name %s\n' "$rel" "$name" >&2
+    errors=$((errors + 1))
+  elif [ "$name" != "$(basename "$dir")" ]; then
+    printf -- '- %s: frontmatter name does not match folder name\n' "$rel" >&2
+    errors=$((errors + 1))
+  fi
+
+  if [ -z "$description" ]; then
+    printf -- '- %s: missing frontmatter description\n' "$rel" >&2
+    errors=$((errors + 1))
+  fi
+
+  if [ -z "$uuid" ]; then
+    printf -- '- %s: missing metadata.uuid\n' "$rel" >&2
+    errors=$((errors + 1))
+  elif [[ ! "$uuid" =~ $uuid_re ]]; then
+    printf -- '- %s: invalid metadata.uuid %s\n' "$rel" "$uuid" >&2
+    errors=$((errors + 1))
+  elif grep -v -F " $rel" "$seen_file" | grep -q "^$uuid "; then
+    printf -- '- %s: duplicate metadata.uuid %s\n' "$rel" "$uuid" >&2
+    errors=$((errors + 1))
+  else
+    printf '%s %s\n' "$uuid" "$rel" >>"$seen_file"
+  fi
+
+  if [ ! -f "$spielman_config" ]; then
+    printf -- '- %s: missing agents/spielman.yaml\n' "$rel" >&2
+    errors=$((errors + 1))
+  else
+    schema="$(yaml_scalar "$spielman_config" schema || true)"
+    if [ "$schema" != "1" ]; then
+      printf -- '- %s: agents/spielman.yaml must contain schema: 1\n' "$rel" >&2
+      errors=$((errors + 1))
+    fi
+    while IFS= read -r protocol_rel; do
+      [ -n "$protocol_rel" ] || continue
+      if ! validate_protocol_rel "$protocol_rel"; then
+        printf -- '- %s: invalid protocol dependency %s\n' "$rel" "$protocol_rel" >&2
+        errors=$((errors + 1))
+      elif [ ! -f "$PROTOCOLS_DIR/$protocol_rel" ]; then
+        printf -- '- %s: missing protocol dependency protocols/%s\n' "$rel" "$protocol_rel" >&2
+        errors=$((errors + 1))
+      fi
+    done < <(skill_protocols "$dir")
+  fi
+
+  return "$errors"
+}
+
+validate_skill_subset() {
+  local errors=0
+  local count=0
+  local name_re='^[a-z0-9]+(-[a-z0-9]+)*$'
+  local uuid_re='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+  local seen_file dir
+  seen_file="$(mktemp)"
+
+  while IFS= read -r skill_md; do
+    dir="$(dirname "$skill_md")"
+    printf '%s %s\n' "$(skill_uuid "$dir")" "${dir#"$REPO_ROOT"/}" >>"$seen_file"
+  done < <(find "$SKILLS_DIR" -name SKILL.md -type f | sort)
+
+  for dir in "$@"; do
+    local validation_status
+    count=$((count + 1))
+    if validate_one_skill_dir "$dir" "$seen_file" "$name_re" "$uuid_re"; then
+      validation_status=0
+    else
+      validation_status=$?
+      errors=$((errors + validation_status))
+    fi
+  done
+
+  if [ "$errors" -ne 0 ]; then
+    rm -f "$seen_file"
+    printf 'Scoped skill validation failed with %s error(s)\n' "$errors" >&2
+    return 1
+  fi
+  rm -f "$seen_file"
+  printf 'validated %s touched skill(s)\n' "$count"
+}
+
+validate_skills() {
+  local errors=0
+  local count=0
+  local name_re='^[a-z0-9]+(-[a-z0-9]+)*$'
+  local uuid_re='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+  local seen_file
+  seen_file="$(mktemp)"
+
+  while IFS= read -r skill_md; do
+    local dir validation_status
+    dir="$(dirname "$skill_md")"
+    count=$((count + 1))
+    if validate_one_skill_dir "$dir" "$seen_file" "$name_re" "$uuid_re"; then
+      validation_status=0
+    else
+      validation_status=$?
+      errors=$((errors + validation_status))
+    fi
+  done < <(find "$SKILLS_DIR" -name SKILL.md -type f | sort)
+
+  if [ "$errors" -ne 0 ]; then
+    rm -f "$seen_file"
+    printf 'Skill validation failed with %s error(s)\n' "$errors" >&2
+    return 1
+  fi
+  rm -f "$seen_file"
+  printf 'validated %s skill(s)\n' "$count"
+}
+
+main() {
+  if [ "$#" -eq 0 ]; then
+    usage
+    return 0
+  fi
+
+  local command="$1"
+  shift
+  case "$command" in
+    help|--help|-h)
+      usage
+      ;;
+    list|list-skills)
+      list_skills
+      ;;
+    list-sets|list-skillsets)
+      list_skillsets
+      ;;
+    validate)
+      validate_skills
+      ;;
+    install|install-skills)
+      install_skills "$@"
+      ;;
+    install-set|install-skillsets)
+      install_skillsets "$@"
+      ;;
+    refresh)
+      refresh_skills "$@"
+      ;;
+    inspect)
+      inspect_skill "$@"
+      ;;
+    grab|import)
+      grab_skill "$@"
+      ;;
+    update)
+      update_source_skill "$@"
+      ;;
+    *)
+      printf 'error: unknown command: %s\n' "$command" >&2
+      usage >&2
+      return 2
+      ;;
+  esac
+}
+
+main "$@"

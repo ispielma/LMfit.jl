@@ -220,33 +220,36 @@ module LMfit
     eval_uncertainty(mr::ModelResult; kwargs...) = eval_uncertainty(mr, 1.0; kwargs...)
     function eval_uncertainty(mr::ModelResult, n_σ; dscale=0.01, kwargs...)
         
-        p = coef(mr) # vector of exposed parameters
+        p = copy(coef(mr)) # vector of exposed parameters
         covar = vcov(mr) # covariance matrix of these parameters
         dp = stderror(mr) .* dscale # derivative step size
-        f = mr.fm(p; kwargs...) # function value
-
-        df = [copy(f) for i in eachindex(p)]
+        # Materialize the model output using the covariance element type.
+        f = collect(eltype(covar), mr.fm(p; kwargs...))
 
         # numerically compute derivatives
-        for i in eachindex(p)
-            p[i] += dp[i]
-            df[i] .-= mr.fm(p; kwargs...)
-            df[i] ./= dp[i]
-            p[i] -= dp[i]
+        df = Vector{typeof(f)}(undef, length(p))
+        try
+            for i in eachindex(p)
+                p_step = copy(p)
+                p_step[i] += dp[i]
+                df[i] = (f .- mr.fm(p_step; kwargs...)) ./ dp[i]
+            end
+        finally
+            mr.fm(p; kwargs...)
         end
 
         # Compute the uncertainty
         err = zero(f)
         for i in eachindex(p), j in eachindex(p)
-            scale = covar[i, j] 
+            scale = covar[i, j]
             err += (df[i] .* df[j]) .* scale
         end
 
         # Get scale factor for error band based on number of sigma desired.
         # for n_σ = this converges to 1 for large dof(); I am not sure why this is not
         # uniquely equal to 1.
-        p = erf(n_σ / sqrt(2))
-        scale =  quantile(TDist(dof(mr)), (1 + p) / 2) 
+        prob = erf(n_σ / sqrt(2))
+        scale = quantile(TDist(dof(mr)), (1 + prob) / 2)
 
         return sqrt.(err) .* scale # for n_σ this multiplies the so-called Students distribution function.
     end
@@ -295,15 +298,10 @@ module LMfit
         covar_inv_flat = vec(covar_inv)   # Fill{Float64,1}
         wt_flat        = vec(wt)          # Fill{Float64,1}
 
-        if wt===nothing
-            result = curve_fit(fm, [], y_flat, p0; lower=lb, upper=ub, not_vars...)
-        else
-            result = curve_fit(fm, [], y_flat, covar_inv_flat .* wt_flat, p0; lower=lb, upper=ub, not_vars...)
-        end
+        result = curve_fit(fm, [], y_flat, covar_inv_flat .* wt_flat, p0; lower=lb, upper=ub, not_vars...)
 
         # scale_covar logic
         if scale_covar
-            result.
             error("scale_covar not implemented yet")
         end
 

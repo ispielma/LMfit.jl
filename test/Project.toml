@@ -1,0 +1,10 @@
+[deps]
+LazyGrids = "7031d0ef-c40d-4431-b2f8-61a8d2f650db"
+LsqFit = "2fda8390-95c7-5789-9bda-21331edee243"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[compat]
+LazyGrids = "1"
+LsqFit = "=0.15.1"
+julia = "1.11"
