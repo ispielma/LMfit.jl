@@ -26,6 +26,21 @@ Regression tests cover range-valued evaluation, finite output, coefficient prese
 
 The stale `LMfit1` import is fixed. Test-only dependencies are isolated in `test/Project.toml`, where LsqFit is pinned to the exact version used by the numerical golden tests; the package itself retains normal compatible-version bounds. `Pkg.test()` now runs successfully. The current tests are focused regressions rather than comprehensive coverage.
 
+### Real-world calling patterns are protected
+
+Compact synthetic tests now protect the distinct LMfit usage patterns found in the DSF example notebooks and Paper_MOT_Dataset without reproducing either analysis. Coverage includes default and positional-weight fits, fixed model context, zero and multiple independent variables, manual and macro-generated models, scalar and vector parameters, constants, expression-derived parameters with dotted exponentials and powers, multidimensional outputs, fitted-model evaluation, result statistics, and confidence bands.
+
+The seeded demo tests separately lock the exact numerical coefficients for all five notebook fits with LsqFit 0.15.1.
+
+### Architecture deepening is implemented
+
+The production source continues to follow the one-module-per-Julia-file rule:
+
+- `ParameterObjects` now owns dependency discovery, validation, flattening, reconstruction, and in-process expression evaluation. It no longer generates Julia source, calls `Meta.parse`, evaluates code globally, or requires `@invokelatest`.
+- `ModelObjects` now has one invocation path and an authoritative fit-keyword router. Independent variables, declared model context, and optimizer options are separated in one place. Existing nested `kwargs=Dict(...)` calls remain supported.
+- `FitObjects` is a self-contained module owning fit preparation, the LsqFit adapter, fitted-result reconstruction, result statistics, and confidence-band evaluation.
+- `LMfit` is now the small package facade that includes the three complete child modules and preserves the existing exported interface and internal type bindings.
+
 ## Open findings
 
 ### P1: Separate inverse covariance from window weights
@@ -59,18 +74,14 @@ The `fit` docstring accepts an inverse covariance vector or matrix, but the impl
 
 MVP completion requires either preserving matrix covariance for LsqFit's matrix-weight path or narrowing the documented interface to diagonal inverse-variance arrays with a clear validation error. Tests should exercise the selected contract.
 
-### P1: Expand public-behavior test coverage
+### P1: Complete public-behavior test coverage
 
-The test harness now works, but the main modeling behavior remains unprotected. Priority tests are:
+The demonstrated and real-world fitting paths are now protected. Remaining priority tests are:
 
 1. Parameter validation, bounds, copying, ordering, and dependency failures.
-2. Constants and expression-derived parameters.
-3. Scalar and vector free parameters.
-4. `Model`, `@generate_model`, `update_vars!`, and multiple independent variables.
-5. Deterministic linear and Gaussian fits.
-6. Multidimensional output flattening and residual-shape restoration.
-7. Initial-parameter immutability and `ps_best` ordering.
-8. DSF-style and Paper_MOT_Dataset-style consumer smoke tests using compact fixtures.
+2. Supported parameter conversions and explicit rejection of invalid conversions.
+3. Missing, extra, and conflicting model/optimizer keyword errors.
+4. Analytic result-statistics tests after the statistics contract is settled.
 
 Tests should use public interfaces and avoid pinning internal helper names or call order.
 
@@ -78,17 +89,9 @@ Tests should use public interfaces and avoid pinning internal helper names or ca
 
 The keyword is public and documented but intentionally throws. Either implement its stated reduced-chi-squared rescaling behavior with tests or remove it until supported. The current explicit error is safe but not an MVP feature.
 
-### P2: Unify model keyword routing
+### P2: Repair `isconverged`
 
-Independent variables, fixed model context, and optimizer options share overlapping keyword channels. A direct call such as `fit(...; x=x, offset=1)` forwards `offset` to LsqFit and fails; consumers must instead know to write `kwargs=Dict(:offset => 1)`. `Model.kwarg_names` does not currently enforce or route these values.
-
-MVP completion requires one authoritative routing rule with clear errors. Model keywords should not be mistaken for optimizer keywords.
-
-### P2: Replace runtime-generated parameter resolution
-
-`resolve_parameters` generates Julia source as strings, parses it, evaluates it globally, forces a `Vector{Float64}` result, and requires `@invokelatest`. This makes expression shape invariants and dependency errors difficult to validate and prevents some otherwise-natural parameter reuse paths.
-
-The preferred direction is an in-process parameter-resolution module that owns dependency validation, flattening, reconstruction, and expression evaluation without global `eval`. Preserve the demonstrated behavior for constants, chained expressions, scalar parameters, and vector parameters.
+`isconverged(result)` is exported but delegates to an LsqFit result method that does not exist in the pinned LsqFit version, so the call raises a `MethodError`. `ModelResult` already stores the convergence flag. Decide whether the public function should return that field or be removed, then add a public-behavior test.
 
 ### P2: Repair or remove invalid parameter conversions
 
@@ -102,12 +105,4 @@ MVP completion requires tests for supported conversions and deletion or correcti
 
 ## Architecture direction
 
-All architecture work must preserve the repository's one-module-per-Julia-file rule. A module is defined completely in one source file; no proposal below permits spreading one namespace across multiple included implementation fragments.
-
-Three deepening opportunities cover most remaining work:
-
-1. Introduce one self-contained fit-preparation and result-statistics module in its own Julia file. It should own shape normalization, covariance/window handling, LsqFit invocation, reconstruction, and statistical definitions. Its complete namespace and implementation must remain in that file.
-2. Deepen the existing `ParameterObjects` module in `src/parameter_objects.jl` so it owns dependency ordering, validation, packing, expression evaluation, and unpacking. Do not split parameter resolution into an implementation fragment that extends `ParameterObjects` from another file.
-3. Deepen the existing `ModelObjects` module in `src/model_objects.jl` with a single model-invocation path that routes independent variables, fixed model context, and optimizer options without nested keyword conventions. Keep that path within the same file-scoped module.
-
-These are all in-process changes. LsqFit remains the only external fitting adapter; no additional abstraction layer or dependency is needed for the MVP.
+The planned architecture deepening is complete and preserves the repository's one-module-per-Julia-file rule. `ParameterObjects`, `ModelObjects`, and `FitObjects` each own a cohesive namespace in one complete source file, while `LMfit` is the package facade. All changes are in-process; LsqFit remains the only external fitting adapter, and no additional abstraction layer or runtime dependency was introduced.

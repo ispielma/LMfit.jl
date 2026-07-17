@@ -85,22 +85,29 @@ module ModelObjects
 
     x is a vector/tuple/whatever of independent variables
     """
-    (m::Model)(ps::Parameters; kwargs...) = m([ps[name].value for (name, _) in m.param_names];  kwargs...) # generate list of parameters, ordered as expected
+    function (m::Model)(ps::Parameters; kwargs...)
+        params = Vector{Any}(undef, length(m.param_names))
+        for (i, name) in enumerate(keys(m.param_names))
+            params[i] = ps[name].value
+        end
+        return _invoke(m, params, kwargs)
+    end
 
     """
     p is a vector of parameter _values_
     kwargs contains the independent (i.e., x, y, ... variables) with keys equal to their names
     """
-    function (m::Model)(p::Vector; kwargs...)
+    (m::Model)(p::Vector; kwargs...) = _invoke(m, p, kwargs)
 
-        (vars, not_vars) = _strip_vars_kwargs(m, kwargs)
+    function _invoke(m::Model, params, kwargs)
+        vars, context = _strip_vars_kwargs(m, kwargs)
 
-        if length(p) != length(m.param_names)
+        if length(params) != length(m.param_names)
             error("p must be same length as Model.param_names")
         end
 
         args = Vector{Any}(undef, length(m.arg_names))
-        for ( (_, index), param) in zip(m.param_names, p)
+        for ((_, index), param) in zip(m.param_names, params)
             args[index] = param
         end
 
@@ -109,7 +116,7 @@ module ModelObjects
             args[index] = vars[name]
         end
 
-        m.func(args...; not_vars...)
+        return m.func(args...; context...)
     end
 
     """
@@ -209,10 +216,52 @@ module ModelObjects
             error("keys(m.var_names) = $(keys(m.var_names)) must be a subset of kwargs = $(keys(kwargs))")
         end
 
-        vars = pairs(NamedTuple( k=>kwargs[k] for k in keys(m.var_names) ))
-        not_vars = pairs(NamedTuple( k=>v for (k, v) in kwargs if !haskey(m.var_names, k) ))
+        var_pairs = Pair{Symbol, Any}[]
+        for name in keys(m.var_names)
+            push!(var_pairs, name => kwargs[name])
+        end
 
-        return (vars, not_vars)
+        context_pairs = Pair{Symbol, Any}[]
+        for (name, value) in kwargs
+            if !haskey(m.var_names, name)
+                push!(context_pairs, name => value)
+            end
+        end
 
+        vars = pairs((; var_pairs...))
+        context = pairs((; context_pairs...))
+        return vars, context
+
+    end
+
+    """
+        _route_fit_kwargs(m, kwargs)
+
+    Separate independent variables, declared model keywords, and fitting
+    options for `fit`. Undeclared non-variable keywords remain fitting options.
+    """
+    function _route_fit_kwargs(m::Model, kwargs)
+        if !(keys(m.var_names) ⊆ keys(kwargs))
+            error("keys(m.var_names) = $(keys(m.var_names)) must be a subset of kwargs = $(keys(kwargs))")
+        end
+
+        var_pairs = Pair{Symbol, Any}[]
+        context_pairs = Pair{Symbol, Any}[]
+        fit_pairs = Pair{Symbol, Any}[]
+
+        for (name, value) in kwargs
+            if haskey(m.var_names, name)
+                push!(var_pairs, name => value)
+            elseif name in m.kwarg_names
+                push!(context_pairs, name => value)
+            else
+                push!(fit_pairs, name => value)
+            end
+        end
+
+        vars = pairs((; var_pairs...))
+        context = pairs((; context_pairs...))
+        fit_opts = pairs((; fit_pairs...))
+        return vars, context, fit_opts
     end
 end

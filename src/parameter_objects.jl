@@ -175,13 +175,28 @@ module ParameterObjects
     Base.String(p::IndependentVariable) = "IndependentVariable: $(p.name)"
 
     function _get_symbols(ex)
-        list = []
-        walk!(list) = ex -> begin
-           ex isa Symbol && push!(list, ex)
-           ex isa Expr && ex.head == :call && map(walk!(list), ex.args[2:end])
-           list
+        symbols = Symbol[]
+        _collect_symbols!(symbols, ex)
+        return Set(symbols)
+    end
+
+    function _collect_symbols!(symbols, ex)
+        if ex isa Symbol
+            push!(symbols, ex)
+        elseif ex isa Expr
+            if ex.head == :. && !(ex.args[2] isa Expr && ex.args[2].head == :tuple)
+                _collect_symbols!(symbols, ex.args[1])
+                return symbols
+            end
+
+            first_arg = ex.head in (:call, :.) ? 2 : 1
+            if first_arg <= length(ex.args)
+                for i in first_arg:length(ex.args)
+                    _collect_symbols!(symbols, ex.args[i])
+                end
+            end
         end
-        Set{Symbol}(walk!([])(ex))
+        return symbols
     end
 
     # Annoying that I have to define this at the end of the module
@@ -335,52 +350,98 @@ module ParameterObjects
     end
 
     """
-    Creates a function that evaluates a vector of varied parameters and returns a vector of all the parameters
+        resolve_parameters(ps::Parameters)
+
+    Build the in-process parameter resolver used by the fitting adapter. The
+    returned function accepts the flat vector varied by LsqFit and returns all
+    parameter values in dependency order as a flat `Vector{Float64}`.
     """
     function resolve_parameters(ps::Parameters)
-        
-        inputs = [p for p in values(ps) if typeof(p) <: Parameter]
-        constants = [p for p in values(ps) if typeof(p) <: Constant]
-        expressions = [p for p in values(ps) if typeof(p) <: Expression]
+        ordered = collect(values(ps))
+        return params -> _resolve(ordered, params)
+    end
 
-        # we take a vector of parameters
-        prog = "(params) -> begin\n"
+    function _resolve(ordered, params)
+        env = Dict{Symbol, Any}()
+        index = 1
 
-        # we unpack the adjustable parameters into their associated variables
-        i = 1
-        for p in inputs
-            len = length(p)
-            line = "   $(p.name) = params[$(i):$(i+len-1)]\n"
-            prog *= line
-            i += len
+        for p in ordered
+            if p isa AbstractIndependentParameter
+                last = index + length(p) - 1
+                env[p.name] = params[index:last]
+                index = last + 1
+            elseif p isa Constant
+                env[p.name] = p.value
+            elseif p isa Expression
+                env[p.name] = _eval_expr(p.expr, env)
+            end
         end
-        prog *= "\n"
 
-        # we unpack the constant parameters into their associated variables
-        lines = ["   $(p.name) = $(p.value)\n" for (i, p) in enumerate(constants)]
-        prog *= join(lines)
-        prog *= "\n"
+        result = Float64[]
+        for p in ordered
+            value = env[p.name]
+            if value isa Number
+                push!(result, value)
+            else
+                append!(result, value)
+            end
+        end
+        return result
+    end
 
-        # we unpack the expression parameters into their associated variables
-        lines = ["   $(p.name) = $(string(p.expr))\n" for (i, p) in enumerate(expressions)]
-        prog *= join(lines)
-        prog *= "\n"
+    _eval_expr(value, env) = value
+    _eval_expr(value::QuoteNode, env) = value.value
 
-        # we pack these up into a single array
-        prog *= "   result::Vector{Float64} = vcat("
-        lines = ["$(p.name), " for (_, p) in enumerate(values(ps))]
-        prog *= join(lines)
-        prog *= ")\n"
-        # prog *= "println(result)\n"
-        
-        prog *= "   return result\n" 
-        prog *= "end"
+    function _eval_expr(name::Symbol, env)
+        if haskey(env, name)
+            return env[name]
+        elseif isdefined(@__MODULE__, name)
+            return getfield(@__MODULE__, name)
+        elseif isdefined(Base, name)
+            return getfield(Base, name)
+        end
+        throw(UndefVarError(name))
+    end
 
-        # println(prog)
+    function _eval_expr(ex::Expr, env)
+        if ex.head == :call
+            return _eval_call(ex.args, env)
+        elseif ex.head == :.
+            if ex.args[2] isa Expr && ex.args[2].head == :tuple
+                fn = _eval_expr(ex.args[1], env)
+                args = _eval_expr(ex.args[2], env)
+                return broadcast(fn, args...)
+            end
+            value = _eval_expr(ex.args[1], env)
+            name = _eval_expr(ex.args[2], env)
+            return getproperty(value, name)
+        elseif ex.head == :tuple
+            return Tuple(_eval_expr(arg, env) for arg in ex.args)
+        elseif ex.head == :ref
+            value = _eval_expr(ex.args[1], env)
+            indices = Tuple(_eval_expr(arg, env) for arg in ex.args[2:end])
+            return getindex(value, indices...)
+        elseif ex.head == :vect
+            return [_eval_expr(arg, env) for arg in ex.args]
+        end
+        throw(ArgumentError("unsupported parameter expression: $(ex)"))
+    end
 
-        body = Meta.parse(prog)
+    function _eval_call(args, env)
+        name = args[1]
+        values = Any[]
+        for arg in args[2:end]
+            push!(values, _eval_expr(arg, env))
+        end
 
-        eval(body)
+        if name isa Symbol && startswith(String(name), ".")
+            plain_name = Symbol(String(name)[2:end])
+            fn = _eval_expr(plain_name, env)
+            return broadcast(fn, values...)
+        end
+
+        fn = _eval_expr(name, env)
+        return fn(values...)
     end
 
     """

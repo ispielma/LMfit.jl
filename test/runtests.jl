@@ -2,6 +2,7 @@ using Test
 using LMfit
 
 include("demo_fits.jl")
+include("consumer_patterns.jl")
 
 @testset "confidence bands" begin
     line(x, a, b) = @. a * x + b
